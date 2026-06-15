@@ -1,14 +1,9 @@
 use std::time::Instant;
 
-// XInput wButtons attack bits — face + shoulder buttons only.
-// Directions (DPAD), start, back, thumbsticks pass through unchanged.
-//   A  = LP  0x1000
-//   B  = LK  0x2000
-//   X  = HK  0x4000
-//   Y  = HP  0x8000
-//   LB = A1  0x0100
-//   RB = A2  0x0200
-pub const ATTACK_MASK: u16 = 0x1000 | 0x2000 | 0x4000 | 0x8000 | 0x0100 | 0x0200;
+// DirectInput rgbButtons attack bits — buttons 0-7 (face + shoulder).
+// From config.ini: Y=btn0 HP, B=btn1 LK, A=btn2 LP, X=btn3 HK, LT=4, RT=5, LB=6, RB=7.
+// Directions live in rgdwPOV / higher button indices and are not in this mask.
+pub const ATTACK_MASK: u16 = 0x00FF; // bits 0-7 = DInput buttons 0-7
 
 // How long to hold the window open waiting for more attack buttons (ms).
 // Ported from gp2040-custom SYNC_WINDOW_CYCLES (15 cycles ≈ 5-15ms depending
@@ -75,8 +70,9 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
-    const LP: u16 = 0x1000;
-    const HP: u16 = 0x8000;
+    // DInput button 2 = A = LP, button 0 = Y = HP (from config.ini)
+    const LP: u16 = 1 << 2; // bit 2
+    const HP: u16 = 1 << 0; // bit 0
 
     #[test]
     fn solo_attack_delayed_then_delivered() {
@@ -115,7 +111,8 @@ mod tests {
 
     #[test]
     fn directions_always_pass_through() {
-        let dirs: u16 = 0x0001 | 0x0002; // DPAD_UP | DPAD_DOWN
+        // Bits 8-9 = DInput buttons 8-9 (START/BACK per config.ini) — outside ATTACK_MASK
+        let dirs: u16 = (1 << 8) | (1 << 9);
         let mut w = SyncWindow::default();
         // Even while window is open, directions are immediate.
         assert_eq!(w.process(LP | dirs), dirs);

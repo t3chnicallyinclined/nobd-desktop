@@ -4,15 +4,15 @@ version = "0.1.0"
 edition = "2024"
 
 [lib]
-# Output is xinput1_4.dll — drop next to the game exe
-name = "xinput1_4"
+# Output is DINPUT8.dll — drop next to the game exe
+name = "DINPUT8"
 crate-type = ["cdylib"]
 
 [dependencies]
 windows-sys = { version = "0.52", features = [
     "Win32_Foundation",
     "Win32_System_LibraryLoader",
-    "Win32_UI_Input_XboxController",
+    "Win32_System_Memory",
 ] }
 
 [profile.release]

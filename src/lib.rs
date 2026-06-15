@@ -1,3 +1,3 @@
-mod exports;
-mod proxy;
-mod sync_window;
+mod dinput_export;
+mod dinput_hook;
+pub mod sync_window;
