@@ -1,10 +1,13 @@
 use std::ffi::c_void;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex, OnceLock};
 use windows_sys::Win32::System::Memory::{VirtualProtect, PAGE_READWRITE};
 use crate::sync_window::SyncWindow;
+use crate::log::log;
 
 const SLOT_CREATE_DEVICE:    usize = 3;
 const SLOT_GET_DEVICE_STATE: usize = 9;
+const SLOT_GET_DEVICE_DATA:  usize = 10;
 // rgbButtons offset in both DIJOYSTATE (80b) and DIJOYSTATE2 (272b)
 const BUTTONS_OFFSET:    usize = 48;
 const ATTACK_BTN_COUNT:  usize = 8; // buttons 0-7 per config.ini
@@ -18,36 +21,65 @@ type GetDeviceStateFn = unsafe extern "system" fn(
     this: *mut c_void, cb_data: u32, lpv_data: *mut c_void,
 ) -> i32;
 
+type GetDeviceDataFn = unsafe extern "system" fn(
+    this: *mut c_void, cb_obj_data: u32, rgdod: *mut c_void,
+    pdw_inout: *mut u32, dw_flags: u32,
+) -> i32;
+
 static REAL_CREATE_DEVICE:    OnceLock<CreateDeviceFn>   = OnceLock::new();
 static REAL_GET_DEVICE_STATE: OnceLock<GetDeviceStateFn> = OnceLock::new();
+static REAL_GET_DEVICE_DATA:  OnceLock<GetDeviceDataFn>  = OnceLock::new();
 static SW: LazyLock<Mutex<SyncWindow>> =
     LazyLock::new(|| Mutex::new(SyncWindow::default()));
 
-unsafe fn patch_vtable_slot(obj: *mut c_void, slot: usize, new_fn: *const ()) -> *const () {
+// --- diagnostics ---
+static GDS_CALLS: AtomicU64 = AtomicU64::new(0); // GetDeviceState call count
+static GDD_CALLS: AtomicU64 = AtomicU64::new(0); // GetDeviceData call count
+static EDGE_LOGS: AtomicU64 = AtomicU64::new(0); // capped button-change logs
+static LAST_ALL:  AtomicU32 = AtomicU32::new(0); // last 32-button snapshot
+
+unsafe fn patch_vtable_slot(obj: *mut c_void, slot: usize, new_fn: *const ()) -> Option<*const ()> {
+    if obj.is_null() {
+        log("patch_vtable_slot: obj is null");
+        return None;
+    }
     let vtable: *mut *const () = unsafe { *(obj as *const *mut *const ()) };
+    if vtable.is_null() {
+        log("patch_vtable_slot: vtable ptr is null");
+        return None;
+    }
     let slot_ptr = unsafe { vtable.add(slot) };
     let original = unsafe { *slot_ptr };
     let mut old_prot = 0u32;
+    let mut dummy = 0u32;
     unsafe {
         VirtualProtect(slot_ptr as _, std::mem::size_of::<usize>(), PAGE_READWRITE, &mut old_prot);
         *slot_ptr = new_fn;
-        VirtualProtect(slot_ptr as _, std::mem::size_of::<usize>(), old_prot, &mut old_prot);
+        VirtualProtect(slot_ptr as _, std::mem::size_of::<usize>(), old_prot, &mut dummy);
     }
-    original
+    Some(original)
 }
 
 pub unsafe fn hook_di8(di8: *mut c_void) {
-    let original = unsafe { patch_vtable_slot(di8, SLOT_CREATE_DEVICE, our_create_device as *const ()) };
-    REAL_CREATE_DEVICE.get_or_init(|| unsafe { std::mem::transmute(original) });
+    log(&format!("hook_di8: patching slot {SLOT_CREATE_DEVICE} on {:p}", di8));
+    match unsafe { patch_vtable_slot(di8, SLOT_CREATE_DEVICE, our_create_device as *const ()) } {
+        Some(orig) => { REAL_CREATE_DEVICE.get_or_init(|| unsafe { std::mem::transmute(orig) }); }
+        None => log("hook_di8: patch failed"),
+    }
 }
 
 unsafe extern "system" fn our_create_device(
     this: *mut c_void, rguid: *const [u8; 16],
     out_device: *mut *mut c_void, punk_outer: *mut c_void,
 ) -> i32 {
-    let real = REAL_CREATE_DEVICE.get().expect("nobd: REAL_CREATE_DEVICE not set");
+    log("our_create_device: called");
+    let real = match REAL_CREATE_DEVICE.get() {
+        Some(f) => f,
+        None => { log("our_create_device: REAL_CREATE_DEVICE not set — passing through"); return -1; }
+    };
     let hr = unsafe { real(this, rguid, out_device, punk_outer) };
-    if hr == 0 {
+    log(&format!("our_create_device: real returned hr={hr:#010x}"));
+    if hr == 0 && !out_device.is_null() {
         let device = unsafe { *out_device };
         if !device.is_null() {
             unsafe { hook_device(device) };
@@ -57,28 +89,90 @@ unsafe extern "system" fn our_create_device(
 }
 
 unsafe fn hook_device(device: *mut c_void) {
-    let original = unsafe { patch_vtable_slot(device, SLOT_GET_DEVICE_STATE, our_get_device_state as *const ()) };
-    REAL_GET_DEVICE_STATE.get_or_init(|| unsafe { std::mem::transmute(original) });
+    log(&format!("hook_device: patching slots {SLOT_GET_DEVICE_STATE}+{SLOT_GET_DEVICE_DATA} on {:p}", device));
+    match unsafe { patch_vtable_slot(device, SLOT_GET_DEVICE_STATE, our_get_device_state as *const ()) } {
+        Some(orig) => { REAL_GET_DEVICE_STATE.get_or_init(|| unsafe { std::mem::transmute(orig) }); }
+        None => log("hook_device: GetDeviceState patch failed"),
+    }
+    match unsafe { patch_vtable_slot(device, SLOT_GET_DEVICE_DATA, our_get_device_data as *const ()) } {
+        Some(orig) => { REAL_GET_DEVICE_DATA.get_or_init(|| unsafe { std::mem::transmute(orig) }); }
+        None => log("hook_device: GetDeviceData patch failed"),
+    }
 }
 
 unsafe extern "system" fn our_get_device_state(
     this: *mut c_void, cb_data: u32, lpv_data: *mut c_void,
 ) -> i32 {
-    let real = REAL_GET_DEVICE_STATE.get().expect("nobd: REAL_GET_DEVICE_STATE not set");
+    let real = match REAL_GET_DEVICE_STATE.get() {
+        Some(f) => f,
+        None => {
+            log("our_get_device_state: REAL_GET_DEVICE_STATE not set");
+            return -1;
+        }
+    };
     let hr = unsafe { real(this, cb_data, lpv_data) };
+
+    let n = GDS_CALLS.fetch_add(1, Ordering::Relaxed);
+    if n == 0 {
+        log(&format!("GetDeviceState FIRST CALL: cbData={cb_data} hr={hr:#010x} null={}", lpv_data.is_null()));
+    }
 
     // Only process joystick reads. Keyboard=256b, mouse=16/24b — skip those.
     if hr == 0 && matches!(cb_data, 80 | 272) && !lpv_data.is_null() {
         unsafe {
             let btn_base = (lpv_data as *mut u8).add(BUTTONS_OFFSET);
-            let mut raw: u16 = 0;
-            for i in 0..ATTACK_BTN_COUNT {
-                if *btn_base.add(i) & 0x80 != 0 { raw |= 1u16 << i; }
+
+            // Diagnostic: snapshot ALL 32 buttons (offset 48..80) and log on
+            // change so we can see the game's real button layout / 0x80 format.
+            let mut all: u32 = 0;
+            for i in 0..32 {
+                if *btn_base.add(i) & 0x80 != 0 { all |= 1u32 << i; }
             }
-            let filtered = SW.lock().unwrap().process(raw);
-            for i in 0..ATTACK_BTN_COUNT {
-                *btn_base.add(i) = if filtered & (1u16 << i) != 0 { 0x80 } else { 0x00 };
+            if all != LAST_ALL.load(Ordering::Relaxed) {
+                LAST_ALL.store(all, Ordering::Relaxed);
+                if EDGE_LOGS.fetch_add(1, Ordering::Relaxed) < 400 {
+                    log(&format!("btn change: 0x{all:08X}  (cbData={cb_data}, call #{n})"));
+                }
             }
+
+            // Sync window operates on attack buttons 0-7 (DInput layout).
+            let raw = (all & 0x00FF) as u16;
+            if let Ok(mut sw) = SW.lock() {
+                let filtered = sw.process(raw, crate::sync_window::ATTACK_MASK);
+                for i in 0..ATTACK_BTN_COUNT {
+                    *btn_base.add(i) = if filtered & (1u16 << i) != 0 { 0x80 } else { 0x00 };
+                }
+            }
+        }
+    } else if hr == 0 && n < 20 {
+        log(&format!("GetDeviceState cbData={cb_data} (skipped — not joystick 80/272)"));
+    }
+    hr
+}
+
+// Passthrough probe: detect whether the game reads input via BUFFERED
+// GetDeviceData (slot 10) instead of immediate GetDeviceState (slot 9).
+// If this fires during gameplay but GetDeviceState does not, that's why the
+// counters don't move — we'd need to filter the buffered event stream instead.
+unsafe extern "system" fn our_get_device_data(
+    this: *mut c_void, cb_obj_data: u32, rgdod: *mut c_void,
+    pdw_inout: *mut u32, dw_flags: u32,
+) -> i32 {
+    let real = match REAL_GET_DEVICE_DATA.get() {
+        Some(f) => f,
+        None => return -1,
+    };
+    let hr = unsafe { real(this, cb_obj_data, rgdod, pdw_inout, dw_flags) };
+
+    let n = GDD_CALLS.fetch_add(1, Ordering::Relaxed);
+    if n == 0 {
+        log(&format!("GetDeviceData FIRST CALL: cbObjData={cb_obj_data} flags={dw_flags:#x} hr={hr:#010x}"));
+    }
+    if hr == 0 && !pdw_inout.is_null() {
+        let count = unsafe { *pdw_inout };
+        // Log only when actual events come through (a real input), capped.
+        if count > 0 && n < 4000 && EDGE_LOGS.fetch_add(1, Ordering::Relaxed) < 400 {
+            log(&format!("GetDeviceData: {count} buffered events (call #{n})"));
         }
     }
     hr

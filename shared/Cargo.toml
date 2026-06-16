@@ -1,0 +1,12 @@
+[package]
+name = "nobd-shared"
+version = "0.1.0"
+edition = "2021"
+description = "Shared-memory NOBD sync config + stats, mapped by both DINPUT8.dll and nobd.exe"
+
+[dependencies]
+windows-sys = { version = "0.52", features = [
+    "Win32_Foundation",
+    "Win32_System_Memory",
+    "Win32_Security",
+] }

@@ -1,3 +1,7 @@
+[workspace]
+members = [".", "app", "shared"]
+resolver = "2"
+
 [package]
 name = "nobd-desktop"
 version = "0.1.0"
@@ -9,10 +13,17 @@ name = "DINPUT8"
 crate-type = ["cdylib"]
 
 [dependencies]
+nobd-shared = { path = "shared" }
+retour = "0.3"
 windows-sys = { version = "0.52", features = [
     "Win32_Foundation",
     "Win32_System_LibraryLoader",
     "Win32_System_Memory",
+    "Win32_System_SystemServices",
+    "Win32_System_SystemInformation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Shell",
+    "Win32_Graphics_Gdi",
 ] }
 
 [profile.release]
