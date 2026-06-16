@@ -3,6 +3,7 @@
 
 mod app;
 mod input;
+mod install;
 mod monitor;
 mod stats;
 mod tray;

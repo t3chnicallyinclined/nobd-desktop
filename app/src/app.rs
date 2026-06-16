@@ -16,11 +16,12 @@ const LOG_MAX: usize = 500;
 // Last DLL heartbeat we saw, to detect whether the in-game hook is actively polling.
 static LAST_HB: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Clone, Copy)]
 enum Tab {
     NobdSync,
     GapTester,
     ButtonMonitor,
+    Install,
 }
 
 enum GapLogEntry {
@@ -54,6 +55,8 @@ pub struct FingerGapApp {
     active_tab: Tab,
     error_msg: Option<String>,
     tray: Option<crate::tray::Tray>,
+    game_path: String,
+    install_msg: String,
 }
 
 impl FingerGapApp {
@@ -62,6 +65,9 @@ impl FingerGapApp {
             Ok(gi) => (Some(gi), None),
             Err(e) => (None, Some(format!("Gamepad init failed: {e}"))),
         };
+        let game_path = crate::install::find_game_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
         Self {
             input,
             stats: GapStats::new(),
@@ -72,7 +78,99 @@ impl FingerGapApp {
             active_tab: Tab::NobdSync,
             error_msg,
             tray: crate::tray::spawn(ctx.clone()),
+            game_path,
+            install_msg: String::new(),
         }
+    }
+}
+
+impl FingerGapApp {
+    fn draw_install(&mut self, ctx: &egui::Context) {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.add_space(6.0);
+            ui.heading("Install NOBD into MvC2");
+            ui.add_space(8.0);
+
+            let dll_ok = crate::install::dll_source().is_some();
+            if !dll_ok {
+                ui.colored_label(
+                    RED,
+                    "\u{26A0} DINPUT8.dll isn't next to nobd.exe. Keep both files in the same folder.",
+                );
+                ui.add_space(6.0);
+            }
+
+            ui.label("MvC2 game folder:");
+            ui.horizontal(|ui| {
+                ui.add(egui::TextEdit::singleline(&mut self.game_path).desired_width(460.0));
+                if ui.button("Re-detect").clicked() {
+                    match crate::install::find_game_dir() {
+                        Some(p) => {
+                            self.game_path = p.display().to_string();
+                            self.install_msg = "Found the game folder.".into();
+                        }
+                        None => {
+                            self.install_msg =
+                                "Couldn't auto-detect \u{2014} paste the game folder path above.".into()
+                        }
+                    }
+                }
+            });
+
+            let game_dir = std::path::PathBuf::from(self.game_path.trim());
+            let path_set = !self.game_path.trim().is_empty();
+            let has_game = path_set && crate::install::has_game(&game_dir);
+            let installed = path_set && crate::install::is_installed(&game_dir);
+
+            ui.add_space(4.0);
+            if !path_set {
+                ui.colored_label(YELLOW, "No game folder set.");
+            } else if !has_game {
+                ui.colored_label(YELLOW, "That folder doesn't contain the MvC2 executable.");
+            } else if installed {
+                ui.colored_label(GREEN, "\u{2713} NOBD is installed here.");
+            } else {
+                ui.colored_label(TEAL, "Game found \u{2014} ready to install.");
+            }
+
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(dll_ok && has_game, egui::Button::new("  Install to game  "))
+                    .clicked()
+                {
+                    self.install_msg = match crate::install::install(&game_dir) {
+                        Ok(()) => "Installed \u{2713}  \u{2014} launch MvC2 (close it first if it's open).".into(),
+                        Err(e) => format!("Install failed: {e}"),
+                    };
+                }
+                if ui.add_enabled(installed, egui::Button::new("  Uninstall  ")).clicked() {
+                    self.install_msg = match crate::install::uninstall(&game_dir) {
+                        Ok(()) => "Uninstalled.".into(),
+                        Err(e) => format!("Uninstall failed: {e}"),
+                    };
+                }
+                if ui.button("  Create desktop shortcut  ").clicked() {
+                    self.install_msg = match crate::install::create_desktop_shortcut() {
+                        Ok(()) => "Desktop shortcut created.".into(),
+                        Err(e) => format!("Shortcut failed: {e}"),
+                    };
+                }
+            });
+
+            if !self.install_msg.is_empty() {
+                ui.add_space(8.0);
+                ui.label(RichText::new(&self.install_msg).strong());
+            }
+
+            ui.add_space(14.0);
+            ui.separator();
+            ui.label(RichText::new("Notes").strong());
+            ui.label("\u{2022} Close the game before Install / Uninstall \u{2014} the DLL is locked while it runs.");
+            ui.label("\u{2022} Enable Steam Input for MvC2 (Steam \u{2192} game \u{2192} Controller).");
+            ui.label("\u{2022} Windows SmartScreen may warn on first run (unsigned) \u{2014} that's expected.");
+            ui.label("\u{2022} To fully remove: Uninstall here, then delete nobd.exe + DINPUT8.dll.");
+        });
     }
 }
 
@@ -211,6 +309,11 @@ impl eframe::App for FingerGapApp {
                     Tab::ButtonMonitor,
                     RichText::new("  Button Monitor  ").size(15.0),
                 );
+                ui.selectable_value(
+                    &mut self.active_tab,
+                    Tab::Install,
+                    RichText::new("  Install  ").size(15.0),
+                );
             });
         });
 
@@ -224,6 +327,7 @@ impl eframe::App for FingerGapApp {
                 self.bounce_count,
             ),
             Tab::ButtonMonitor => draw_button_monitor(ctx, &self.monitor),
+            Tab::Install => self.draw_install(ctx),
         }
 
         // Repaint continuously so live DLL stats / gamepad input stay current.
