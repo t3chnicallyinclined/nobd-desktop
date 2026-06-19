@@ -92,7 +92,7 @@ All stats come from the in-game hook over shared memory and update live. The top
 | Stat | What it means | Good values |
 |------|---------------|-------------|
 | **Frame-boundary splits caught** *(headline)* | Provable saves — a grouped delivery where a member actually crossed a game frame, so without NOBD it would have been read alone on an earlier frame (a split). The subtitle is `saves / groups`. | climbs as you play |
-| **Poll rate** | Health of the ~1 kHz poll thread. Confirms it's alive and sampling your stick. | ~1000–1400 Hz |
+| **Poll rate** | How fast **our** background thread samples Windows' XInput API — a health check that the sampler is alive. Set by our poll loop (~1 kHz target), **not** the board's USB report rate (your GP2040 already reports to Windows at 1000 Hz upstream). | ~900–1000 Hz |
 | **Input latency (press→game)** | True input latency: from the physical press (timestamped by the poll thread) to the first game read that actually delivers it — **frame quantization included**. | avg < 8 ms |
 | **Waited a frame** | Of delivered presses, how many actually paid a +1-frame cost (the press was withheld across a game read). This is the real latency cost, shown as `X of Y (Z%)`. | low % (~18%) |
 | **Grouped (2+)** / **Singles** | Commits delivered with 2+ attack buttons together vs. solo presses. | — |
