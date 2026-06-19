@@ -22,6 +22,11 @@ const WBUTTONS_OFFSET: usize = 4;
 // protect the 16.67ms frame budget regardless of the configured window.
 const MAX_BLOCK_MS: u64 = 8;
 
+// Sanity ceiling for a game-perceived latency sample (µs). A real press→read is
+// at most the window (≤16ms) plus a frame or two; anything larger is a pause /
+// alt-tab / load screen and must not pollute the latency average.
+const GP_LAT_SANE_MAX_US: u64 = 100_000; // 100 ms
+
 // Settle window default lives in shared config (config::settle_ms); once we have
 // 2+ attack buttons we wait that long for a 3rd straggler (e.g. assist call after
 // a 2-button action) so multi-button inputs land on one frame instead of split.
@@ -233,7 +238,13 @@ unsafe fn continuous_apply(btn: *mut u16, raw: u16) {
             if newly & (1 << bit) != 0 {
                 let ts = CONT_PRESS_TS[bit].load(Ordering::Relaxed);
                 if ts != 0 && now >= ts {
-                    crate::config::record_gp_latency(now - ts);
+                    let d = now - ts;
+                    // Ignore implausible samples (game pause / alt-tab / load screen:
+                    // a press sat committed across a long no-read gap), which would
+                    // otherwise inflate the latency average and max.
+                    if d <= GP_LAT_SANE_MAX_US {
+                        crate::config::record_gp_latency(d);
+                    }
                 }
                 // A game read passed while this press was withheld → it cost a frame.
                 if seen & (1 << bit) != 0 {
