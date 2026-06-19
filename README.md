@@ -7,6 +7,8 @@ NOBD Desktop brings the [GP2040-CE NOBD](https://github.com/t3chnicallyinclined/
 <!-- Hero shot: the NOBD Sync tab with the hook LIVE and stats flowing -->
 ![NOBD Desktop control panel](docs/images/control-panel.png)
 
+> 📖 **New here?** See the [**Usage Guide**](docs/USAGE.md) — a page-by-page walkthrough (Install, NOBD Sync, and the Finger Gap Tester, including how to read it and pick your window).
+
 ---
 
 ## The problem it fixes
