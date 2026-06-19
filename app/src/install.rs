@@ -94,13 +94,38 @@ pub fn uninstall(game_dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Resolve the real Desktop folder. The "Shell Folders" registry value holds the
+/// fully-expanded path, which handles OneDrive redirection (USERPROFILE\Desktop
+/// often doesn't exist when the Desktop is redirected into OneDrive).
+fn desktop_dir() -> Option<PathBuf> {
+    use winreg::enums::HKEY_CURRENT_USER;
+    use winreg::RegKey;
+    if let Ok(key) = RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey("Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Shell Folders")
+    {
+        if let Ok(p) = key.get_value::<String, _>("Desktop") {
+            let pb = PathBuf::from(p);
+            if pb.exists() {
+                return Some(pb);
+            }
+        }
+    }
+    if let Ok(profile) = std::env::var("USERPROFILE") {
+        let pb = PathBuf::from(profile).join("Desktop");
+        if pb.exists() {
+            return Some(pb);
+        }
+    }
+    None
+}
+
 /// Create a desktop shortcut to nobd.exe via the WScript.Shell COM object.
 pub fn create_desktop_shortcut() -> Result<(), String> {
     use std::os::windows::process::CommandExt;
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let workdir = exe.parent().ok_or("no parent dir")?.to_path_buf();
-    let profile = std::env::var("USERPROFILE").map_err(|_| "USERPROFILE not set")?;
-    let lnk = PathBuf::from(profile).join("Desktop").join("NOBD Desktop.lnk");
+    let desk = desktop_dir().ok_or("Couldn't locate the Desktop folder")?;
+    let lnk = desk.join("NOBD Desktop.lnk");
 
     let ps = format!(
         "$s=(New-Object -COM WScript.Shell).CreateShortcut('{}'); \

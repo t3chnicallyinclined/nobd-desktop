@@ -36,6 +36,11 @@ pub fn record_gp_latency(us: u64) {
 #[inline] pub fn frame_waits() -> u64 { state().frame_waits.load(Ordering::Relaxed) }
 #[inline] pub fn gp_count() -> u64 { state().gp_lat_count.load(Ordering::Relaxed) }
 
+// Passive monitoring (sync OFF): a gapped two-button attempt, and one the game
+// actually split across a frame.
+#[inline] pub fn record_attempt() { state().attempts.fetch_add(1, Ordering::Relaxed); }
+#[inline] pub fn record_miss() { state().misses.fetch_add(1, Ordering::Relaxed); }
+
 #[inline] pub fn directions_windowed() -> bool { state().directions_windowed.load(Ordering::Relaxed) != 0 }
 #[inline] pub fn set_directions(v: bool) { state().directions_windowed.store(v as u32, Ordering::Relaxed); }
 

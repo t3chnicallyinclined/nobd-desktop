@@ -266,6 +266,8 @@ fn continuous_poll_loop() {
     // that actually crossed a game frame), not here at ~1kHz.
     sw.record_saves = false;
     let mut last_raw_atks: u16 = 0;
+    // Passive monitor (sync OFF): timestamp of the lead press of a potential pair.
+    let mut shadow_lead: Option<u64> = None;
     let mut iters: u64 = 0;
     let mut rate_start = Instant::now();
 
@@ -298,6 +300,42 @@ fn continuous_poll_loop() {
                 }
             }
             last_raw_atks = raw_atks;
+
+            // Passive monitor while sync is OFF: detect gapped two-button attempts
+            // and whether the game split them across a frame (a missed dash). The
+            // straddle test reuses LAST_POLL_US (the latest game read time, same
+            // epoch). When sync is ON these are prevented and counted as saves.
+            if !crate::config::enabled() {
+                let window_us = (crate::config::window_ms() as u64) * 1000;
+                if let Some(lead) = shadow_lead {
+                    if now.saturating_sub(lead) > window_us {
+                        shadow_lead = None; // lead had no partner — a single press
+                    }
+                }
+                if rising != 0 {
+                    match shadow_lead {
+                        None => shadow_lead = Some(now),
+                        Some(lead) => {
+                            let gap = now.saturating_sub(lead);
+                            if gap <= window_us {
+                                crate::config::record_attempt();
+                                crate::config::record_gap(gap);
+                                // A game read fell between the two presses → the
+                                // game saw the lead alone → the pair split.
+                                if LAST_POLL_US.load(Ordering::Relaxed) > lead {
+                                    crate::config::record_miss();
+                                }
+                            }
+                            shadow_lead = None;
+                        }
+                    }
+                }
+                if raw_atks == 0 {
+                    shadow_lead = None;
+                }
+            } else {
+                shadow_lead = None;
+            }
 
             let synced_mask: u16 =
                 if crate::config::directions_windowed() { 0xFFFF } else { XINPUT_ATTACK_MASK };

@@ -74,6 +74,12 @@ pub struct SharedState {
     // one game frame (the press was physically held but withheld at a prior
     // read). In Continuous this should be low; in Defer it's ~every lone press.
     pub frame_waits: AtomicU64,
+
+    // Passive monitoring while sync is OFF: gapped two-button attempts observed,
+    // and how many the game actually split across a frame (a missed dash). Only
+    // recorded when sync is disabled (when on, the same events become `saves`).
+    pub attempts: AtomicU64,
+    pub misses: AtomicU64,
 }
 
 impl SharedState {
@@ -95,7 +101,7 @@ impl SharedState {
                   &self.lat_sum_us, &self.lat_count, &self.gap_sum_us, &self.gap_max_us,
                   &self.gap_count, &self.saves,
                   &self.gp_lat_sum_us, &self.gp_lat_count, &self.gp_lat_max_us,
-                  &self.frame_waits] {
+                  &self.frame_waits, &self.attempts, &self.misses] {
             a.store(0, Ordering::Relaxed);
         }
     }

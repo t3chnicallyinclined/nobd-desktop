@@ -258,17 +258,33 @@ impl eframe::App for FingerGapApp {
 
         ctx.request_repaint_after(std::time::Duration::from_millis(1));
 
+        // DLL install + in-game hook status, computed once per frame and shown as
+        // a banner on every tab. (hook_live uses LAST_HB, so compute it only here.)
+        let game_dir = std::path::PathBuf::from(self.game_path.trim());
+        let dll_installed =
+            !self.game_path.trim().is_empty() && crate::install::is_installed(&game_dir);
+        let hb = nobd_shared::state()
+            .dll_heartbeat
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let hook_live = {
+            let prev = LAST_HB.swap(hb, std::sync::atomic::Ordering::Relaxed);
+            hb != prev && hb != 0
+        };
+
         // === TOP BAR ===
         egui::TopBottomPanel::top("header").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.heading(RichText::new("NOBD INPUT TESTER").strong());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("Reset").clicked() {
+                        // Local gap-tester stats…
                         self.stats.clear();
                         self.gap_log.clear();
                         self.stray_count = 0;
                         self.bounce_count = 0;
                         self.monitor.clear();
+                        // …and the live in-game (shared-memory) NOBD stats.
+                        nobd_shared::state().reset_stats();
                     }
                 });
             });
@@ -290,6 +306,21 @@ impl eframe::App for FingerGapApp {
                 }
             }
 
+            // DLL / in-game hook status banner — guides install if it's missing.
+            if hook_live {
+                ui.colored_label(GREEN, "\u{25CF} In-game hook LIVE");
+            } else if dll_installed {
+                ui.colored_label(YELLOW, "\u{25CF} DLL installed \u{2014} launch MvC2 to activate the sync");
+            } else {
+                ui.horizontal(|ui| {
+                    ui.colored_label(RED, "\u{25CF} DLL not installed.");
+                    if ui.button("Open Install tab").clicked() {
+                        self.active_tab = Tab::Install;
+                    }
+                    ui.label("so the sync loads with MvC2.");
+                });
+            }
+
             ui.separator();
 
             // Tabs
@@ -302,7 +333,7 @@ impl eframe::App for FingerGapApp {
                 ui.selectable_value(
                     &mut self.active_tab,
                     Tab::GapTester,
-                    RichText::new("  Gap Tester  ").size(15.0),
+                    RichText::new("  Finger Gap Tester  ").size(15.0),
                 );
                 ui.selectable_value(
                     &mut self.active_tab,
@@ -318,7 +349,7 @@ impl eframe::App for FingerGapApp {
         });
 
         match self.active_tab {
-            Tab::NobdSync => draw_nobd_sync(ctx),
+            Tab::NobdSync => draw_nobd_sync(ctx, hook_live, dll_installed),
             Tab::GapTester => draw_gap_tester(
                 ctx,
                 &self.stats,
@@ -337,27 +368,22 @@ impl eframe::App for FingerGapApp {
 
 // ─── NOBD SYNC TAB (controls the live DINPUT8.dll over shared memory) ───
 
-fn draw_nobd_sync(ctx: &egui::Context) {
+fn draw_nobd_sync(ctx: &egui::Context, hook_live: bool, dll_installed: bool) {
     use std::sync::atomic::Ordering;
     let s = nobd_shared::state();
 
     egui::CentralPanel::default().show(ctx, |ui| {
-        // Connection status — heartbeat moves while the game's hook is polling.
-        let hb = s.dll_heartbeat.load(Ordering::Relaxed);
-        let live = {
-            let prev = LAST_HB.swap(hb, Ordering::Relaxed);
-            hb != prev && hb != 0
-        };
+        // Connection status (computed once per frame in update()).
         ui.horizontal(|ui| {
-            if live {
+            if hook_live {
                 ui.colored_label(GREEN, "\u{25CF}");
                 ui.label(RichText::new("In-game hook LIVE").color(GREEN));
-            } else if hb != 0 {
+            } else if dll_installed {
                 ui.colored_label(YELLOW, "\u{25CF}");
-                ui.label("Hook loaded, game idle/paused");
+                ui.label("DLL installed \u{2014} launch MvC2 to activate");
             } else {
                 ui.colored_label(RED, "\u{25CF}");
-                ui.label("Game not running (launch MvC2 with DINPUT8.dll installed)");
+                ui.label("DLL not installed \u{2014} open the Install tab to set it up");
             }
         });
         ui.separator();
@@ -452,22 +478,39 @@ fn draw_nobd_sync(ctx: &egui::Context) {
         let poll_hz = s.poll_hz.load(Ordering::Relaxed);
         let (gp_avg, gp_max) = s.game_perceived_ms();
 
-        // Headline: provable frame-boundary saves (a lone attack read by the
-        // poll whose partner arrived before the next poll → would have split).
-        ui.horizontal(|ui| {
-            ui.label(RichText::new(format!("{saves}")).size(34.0).strong().color(GREEN));
-            ui.vertical(|ui| {
-                ui.label(RichText::new("frame-boundary splits caught").size(15.0));
-                // saves ⊆ groups (a save is a group that crossed a frame), so the
-                // rate is saves / groups.
-                let rate = if groups > 0 {
-                    saves as f64 / groups as f64 * 100.0
-                } else { 0.0 };
-                ui.weak(format!(
-                    "{rate:.0}% of grouped inputs would have split across a frame without NOBD"
-                ));
+        // Headline: when sync is ON, frame-boundary splits we CAUGHT (saves).
+        // When OFF, the passive monitor shows the splits that ACTUALLY occurred.
+        let attempts = s.attempts.load(Ordering::Relaxed);
+        let misses = s.misses.load(Ordering::Relaxed);
+        if enabled {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(format!("{saves}")).size(34.0).strong().color(GREEN));
+                ui.vertical(|ui| {
+                    ui.label(RichText::new("frame-boundary splits caught").size(15.0));
+                    // saves ⊆ groups (a save is a group that crossed a frame).
+                    let rate = if groups > 0 {
+                        saves as f64 / groups as f64 * 100.0
+                    } else { 0.0 };
+                    ui.weak(format!(
+                        "{rate:.0}% of grouped inputs would have split across a frame without NOBD"
+                    ));
+                });
             });
-        });
+        } else {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(format!("{misses}")).size(34.0).strong().color(RED));
+                ui.vertical(|ui| {
+                    ui.label(RichText::new("frame-boundary splits MISSED \u{2014} sync is OFF")
+                        .size(15.0).color(RED));
+                    let rate = if attempts > 0 {
+                        misses as f64 / attempts as f64 * 100.0
+                    } else { 0.0 };
+                    ui.weak(format!(
+                        "{rate:.0}% of {attempts} gapped multi-button inputs split across a frame \u{2014} turn sync ON to fix"
+                    ));
+                });
+            });
+        }
 
         egui::CollapsingHeader::new(RichText::new("\u{24D8}  What is the frame-boundary issue?").color(TEAL))
             .default_open(false)
