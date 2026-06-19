@@ -4,6 +4,9 @@
 
 NOBD Desktop brings the [GP2040-CE NOBD](https://github.com/t3chnicallyinclined/GP2040-CE-NOBD) sync window to the PC version of MvC2. It groups near-simultaneous attack presses (LP+HP for a dash, an assist call alongside an action, etc.) so they land on the **same game frame** instead of getting split into a stray jab — without a NOBD stick.
 
+<!-- Hero shot: the NOBD Sync tab with the hook LIVE and stats flowing -->
+![NOBD Desktop control panel](docs/images/control-panel.png)
+
 ---
 
 ## The problem it fixes
@@ -81,6 +84,12 @@ The game reads the pad via XInput thanks to **Steam Input** presenting your cont
 - **Button Monitor** — per-button press counts, hold durations, and repress gaps.
 - **Install** — auto-detect the Steam install, install/uninstall the DLL, and create a desktop shortcut.
 
+<!-- The Finger Gap Tester tab: histogram + recommended NOBD value -->
+![Finger Gap Tester](docs/images/finger-gap-tester.png)
+
+<!-- The Install tab: auto-detected Steam path + Install/Uninstall buttons -->
+![Install tab](docs/images/install-tab.png)
+
 ---
 
 ## Stats explained
@@ -100,6 +109,9 @@ All stats come from the in-game hook over shared memory and update live. The top
 | **Your finger gap** | Measured time between the two presses of your grouped inputs. Drives the **recommended window**. | your natural gap |
 | **Game frame time** | Frame interval derived from the game's read cadence. | ~16.67 ms (60 fps) |
 
+<!-- Sync ON: green "splits caught" headline + the full live stats grid -->
+![Live stats with sync ON](docs/images/stats-on.png)
+
 ### When sync is OFF — passive monitor
 
 Turn the sync off and the poll thread keeps watching (it doesn't correct anything) so you can see the problem first-hand:
@@ -110,6 +122,9 @@ Turn the sync off and the poll thread keeps watching (it doesn't correct anythin
 | **Your finger gap** | Still measured, so the recommended window works even with sync off. |
 
 Flip sync **OFF → play a set → ON → play a set** for a direct before/after: misses (off) become saves (on).
+
+<!-- Sync OFF: red "splits MISSED" headline (passive monitor) -->
+![Passive monitor with sync OFF](docs/images/stats-off.png)
 
 ---
 
