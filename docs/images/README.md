@@ -6,10 +6,10 @@ Drop PNGs here with these exact filenames so they render in the main
 | File | What to capture |
 |------|-----------------|
 | `control-panel.png` | **Hero shot** — the NOBD Sync tab with the green "In-game hook LIVE" banner and stats flowing (MvC2 running). |
-| `stats-on.png` | Sync **ON**: the green "frame-boundary splits caught" headline + the full live stats grid (poll rate, input latency, waited-a-frame, finger gap, frame time). |
-| `stats-off.png` | Sync **OFF**: the red "frame-boundary splits MISSED" headline (passive monitor) after a set. |
 | `finger-gap-tester.png` | The Finger Gap Tester tab — the gap histogram + recommended NOBD value. |
 | `install-tab.png` | The Install tab — auto-detected Steam game path + Install/Uninstall buttons. |
+| `stats-on.png` *(optional)* | Sync **ON**: the green "splits caught" headline + the live stats grid. Re-add the ref in README if you capture it. |
+| `stats-off.png` *(optional)* | Sync **OFF**: the red "splits MISSED" passive-monitor headline. Re-add the ref in README if you capture it. |
 
 Tip: capture the window at a consistent size so the images line up. `Alt+PrtSc`
 grabs just the active window; crop if needed.
