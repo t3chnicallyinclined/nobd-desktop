@@ -51,6 +51,29 @@ pub struct SharedState {
 
     // heartbeat the DLL bumps each XInput poll so the app can show "connected"
     pub dll_heartbeat: AtomicU64,
+
+    // --- appended fields (keep at the END so existing offsets never move; an
+    //     older DLL just ignores these, a newer DLL reads 0 from an older app) ---
+
+    // Latch mode: 0 = Defer, 1 = Block, 2 = Continuous. Supersedes
+    // block_in_frame; the UI keeps block_in_frame in sync so an older DLL that
+    // only knows block/defer still behaves sanely.
+    pub mode: AtomicU32,
+
+    // Measured continuous-poll-thread rate (Hz). 0 unless Continuous is running.
+    pub poll_hz: AtomicU32,
+
+    // Game-perceived input latency (µs): physical press → the first game read
+    // that actually sees it (includes frame quantization). Measured only in
+    // Continuous mode, where the poll thread can timestamp the physical press.
+    pub gp_lat_sum_us: AtomicU64,
+    pub gp_lat_count: AtomicU64,
+    pub gp_lat_max_us: AtomicU64,
+
+    // Of the deliveries counted in gp_lat_count, how many had to wait at least
+    // one game frame (the press was physically held but withheld at a prior
+    // read). In Continuous this should be low; in Defer it's ~every lone press.
+    pub frame_waits: AtomicU64,
 }
 
 impl SharedState {
@@ -62,6 +85,7 @@ impl SharedState {
         self.block_in_frame.store(0, Ordering::Relaxed);
         self.directions_windowed.store(0, Ordering::Relaxed);
         self.settle_ms.store(1, Ordering::Relaxed);
+        self.mode.store(2, Ordering::Relaxed); // Continuous (best latency, online-safe)
         // stats start at 0 (mapping is zero-initialized)
         self.magic.store(MAGIC, Ordering::Release);
     }
@@ -69,9 +93,19 @@ impl SharedState {
     pub fn reset_stats(&self) {
         for a in [&self.groups, &self.singles, &self.lat_last_us, &self.lat_max_us,
                   &self.lat_sum_us, &self.lat_count, &self.gap_sum_us, &self.gap_max_us,
-                  &self.gap_count, &self.saves] {
+                  &self.gap_count, &self.saves,
+                  &self.gp_lat_sum_us, &self.gp_lat_count, &self.gp_lat_max_us,
+                  &self.frame_waits] {
             a.store(0, Ordering::Relaxed);
         }
+    }
+
+    /// (avg_ms, max_ms) of game-perceived input latency (Continuous mode only).
+    pub fn game_perceived_ms(&self) -> (f64, f64) {
+        let n = self.gp_lat_count.load(Ordering::Relaxed);
+        if n == 0 { return (0.0, 0.0); }
+        let avg = self.gp_lat_sum_us.load(Ordering::Relaxed) as f64 / n as f64 / 1000.0;
+        (avg, self.gp_lat_max_us.load(Ordering::Relaxed) as f64 / 1000.0)
     }
 
     /// (avg_ms, max_ms) of total added latency.

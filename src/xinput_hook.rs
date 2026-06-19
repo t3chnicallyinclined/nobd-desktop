@@ -53,6 +53,23 @@ static XLAST:      AtomicU32 = AtomicU32::new(0xFFFF_FFFF);
 static EPOCH:        OnceLock<Instant> = OnceLock::new();
 static LAST_POLL_US: AtomicU64 = AtomicU64::new(0);
 
+// --- continuous-poll mode (mode==2) ---
+// committed (windowed) bits + the synced-mask used, published by the poll thread
+// and sampled by the game's read.
+static CONT_COMMITTED:   AtomicU32 = AtomicU32::new(0);
+static CONT_SYNCED_MASK: AtomicU32 = AtomicU32::new(XINPUT_ATTACK_MASK as u32);
+// physical-press timestamp (epoch µs) per button bit, set by the poll thread.
+static CONT_PRESS_TS: [AtomicU64; 16] = [const { AtomicU64::new(0) }; 16];
+// attack bits last shown to the game, for game-perceived-latency edge detection.
+static GAME_LAST_DELIVERED: AtomicU32 = AtomicU32::new(0);
+// last controller index the game polled, so the poll thread reads the same pad.
+static ACTIVE_IDX: AtomicU32 = AtomicU32::new(0);
+// throttle counter for the poll-thread heartbeat log line.
+static HEARTBEATS: AtomicU64 = AtomicU64::new(0);
+// attack bits physically pressed but withheld from the game at a prior read,
+// so a delivery that started withheld can be counted as "waited a frame".
+static WITHHELD_SEEN: AtomicU32 = AtomicU32::new(0);
+
 unsafe extern "system" fn our_xinput_get_state(idx: u32, p_state: *mut c_void) -> u32 {
     let real = match REAL_XIGS.get() {
         Some(f) => f,
@@ -86,13 +103,24 @@ unsafe extern "system" fn our_xinput_get_state(idx: u32, p_state: *mut c_void) -
                 }
             }
 
-            if crate::config::block_in_frame() {
-                // Hold the read open and group within THIS frame (sub-frame latency).
-                block_latch(*real, idx, p_state, btn, raw);
-            } else if let Ok(mut sw) = SWX.lock() {
-                // Defer-to-next-frame sync window (+1 frame, zero budget cost).
-                let filtered = sw.process(raw, XINPUT_ATTACK_MASK);
-                *btn = filtered;
+            ACTIVE_IDX.store(idx, Ordering::Relaxed);
+            match crate::config::mode() {
+                1 => {
+                    // Block: hold the read open and group within THIS frame.
+                    block_latch(*real, idx, p_state, btn, raw);
+                }
+                2 => {
+                    // Continuous: the poll thread maintains committed state on its
+                    // own ~1kHz clock; here we just sample it (directions stay raw).
+                    continuous_apply(btn, raw);
+                }
+                _ => {
+                    // Defer: per-read window (+1 frame on a lone press, 0 budget cost).
+                    if let Ok(mut sw) = SWX.lock() {
+                        let filtered = sw.process(raw, XINPUT_ATTACK_MASK);
+                        *btn = filtered;
+                    }
+                }
             }
         }
     }
@@ -176,6 +204,135 @@ unsafe fn block_latch(
     LAST_DELIVERED.store(delivered as u32, Ordering::Relaxed);
 }
 
+// Continuous mode: sample the poll thread's committed state. Directions and
+// already-held bits come straight from the fresh real read; attack bits are
+// overwritten with the windowed-committed value. Records game-perceived latency
+// (physical press → first game read that sees it) on each fresh delivery.
+unsafe fn continuous_apply(btn: *mut u16, raw: u16) {
+    if !crate::config::enabled() {
+        return; // raw passthrough for live A/B
+    }
+    let mask = CONT_SYNCED_MASK.load(Ordering::Relaxed) as u16;
+    let committed = CONT_COMMITTED.load(Ordering::Relaxed) as u16;
+    let delivered = (raw & !mask) | (committed & mask);
+    unsafe { *btn = delivered; }
+
+    let committed_atks = committed & XINPUT_ATTACK_MASK;
+    let raw_atks = raw & XINPUT_ATTACK_MASK;
+
+    // Bits the game would have seen pressed (raw) but we're withholding this read.
+    // Mark them sticky; `seen` includes prior reads + this one.
+    let withheld_now = raw_atks & !committed_atks;
+    let seen = WITHHELD_SEEN.fetch_or(withheld_now as u32, Ordering::Relaxed) as u16 | withheld_now;
+
+    let prev = GAME_LAST_DELIVERED.load(Ordering::Relaxed) as u16;
+    let newly = committed_atks & !prev;
+    if newly != 0 {
+        let now = EPOCH.get_or_init(Instant::now).elapsed().as_micros() as u64;
+        for bit in 0..16 {
+            if newly & (1 << bit) != 0 {
+                let ts = CONT_PRESS_TS[bit].load(Ordering::Relaxed);
+                if ts != 0 && now >= ts {
+                    crate::config::record_gp_latency(now - ts);
+                }
+                // A game read passed while this press was withheld → it cost a frame.
+                if seen & (1 << bit) != 0 {
+                    crate::config::record_frame_wait();
+                }
+            }
+        }
+        // True frame-boundary save: a group is delivered together AND at least one
+        // member had waited a frame (so without NOBD it would have been read alone
+        // on an earlier frame, splitting from its partner).
+        if newly.count_ones() >= 2 && (newly & seen) != 0 {
+            crate::config::record_save();
+        }
+        // Delivered bits are no longer withheld.
+        WITHHELD_SEEN.fetch_and(!(newly as u32), Ordering::Relaxed);
+    }
+    // Drop sticky bits no longer physically pressed (released sub-window taps).
+    WITHHELD_SEEN.fetch_and(raw_atks as u32, Ordering::Relaxed);
+    GAME_LAST_DELIVERED.store(committed_atks as u32, Ordering::Relaxed);
+}
+
+// Background thread: poll the real pad ~1kHz, run the sync window on this fine
+// clock, and publish the committed state for the game's read to sample. This is
+// the firmware's continuous-poll model ported to the desktop — a lone press's
+// window resolves off the game's cadence, so most presses land on the same frame
+// they would have anyway (no unconditional +1 frame).
+fn continuous_poll_loop() {
+    let mut sw = SyncWindow::default();
+    // Saves are counted accurately in the hook for Continuous (a group delivery
+    // that actually crossed a game frame), not here at ~1kHz.
+    sw.record_saves = false;
+    let mut last_raw_atks: u16 = 0;
+    let mut iters: u64 = 0;
+    let mut rate_start = Instant::now();
+
+    loop {
+        if crate::config::mode() != 2 {
+            std::thread::sleep(Duration::from_millis(10));
+            last_raw_atks = 0;
+            continue;
+        }
+        let Some(real) = REAL_XIGS.get() else {
+            std::thread::sleep(Duration::from_millis(50));
+            continue;
+        };
+        // XINPUT_STATE = dwPacketNumber(4) + XINPUT_GAMEPAD(12) = 16 bytes.
+        let mut buf = [0u8; 16];
+        let idx = ACTIVE_IDX.load(Ordering::Relaxed);
+        let r = unsafe { real(idx, buf.as_mut_ptr() as *mut c_void) };
+        if r == 0 {
+            let raw = u16::from_le_bytes([buf[WBUTTONS_OFFSET], buf[WBUTTONS_OFFSET + 1]]);
+            let now = EPOCH.get_or_init(Instant::now).elapsed().as_micros() as u64;
+
+            // Timestamp physical attack rising edges for game-perceived latency.
+            let raw_atks = raw & XINPUT_ATTACK_MASK;
+            let rising = raw_atks & !last_raw_atks;
+            if rising != 0 {
+                for bit in 0..16 {
+                    if rising & (1 << bit) != 0 {
+                        CONT_PRESS_TS[bit].store(now, Ordering::Relaxed);
+                    }
+                }
+            }
+            last_raw_atks = raw_atks;
+
+            let synced_mask: u16 =
+                if crate::config::directions_windowed() { 0xFFFF } else { XINPUT_ATTACK_MASK };
+            // process() records groups/singles/saves/finger-gap/window-hold on
+            // this fine clock; we publish only the committed (windowed) bits.
+            let filtered = sw.process(raw, XINPUT_ATTACK_MASK);
+            CONT_COMMITTED.store((filtered & synced_mask) as u32, Ordering::Relaxed);
+            CONT_SYNCED_MASK.store(synced_mask as u32, Ordering::Relaxed);
+        }
+
+        iters += 1;
+        let el = rate_start.elapsed();
+        if el.as_millis() >= 500 {
+            let hz = (iters as f64 / el.as_secs_f64()) as u32;
+            crate::config::set_poll_hz(hz);
+            // Heartbeat ~every 2s (capped) so the log confirms the poll thread is
+            // alive and at what rate, even with no input.
+            let h = HEARTBEATS.fetch_add(1, Ordering::Relaxed);
+            if h % 4 == 0 && h < 480 {
+                crate::log::log(&format!(
+                    "continuous: poll_hz={hz}  committed=0x{:04X}  waited_a_frame={}/{}",
+                    CONT_COMMITTED.load(Ordering::Relaxed),
+                    crate::config::frame_waits(), crate::config::gp_count(),
+                ));
+            }
+            iters = 0;
+            rate_start = Instant::now();
+        }
+
+        // ~1.4kHz target. Rust's std sleep uses high-resolution timers on Windows,
+        // so a sub-ms sleep is honored without timeBeginPeriod.
+        std::thread::sleep(Duration::from_micros(700));
+    }
+}
+
 unsafe fn try_install() -> bool {
     for name in XINPUT_DLLS {
         let h = unsafe { GetModuleHandleA(name.as_ptr()) };
@@ -208,6 +365,9 @@ unsafe fn try_install() -> bool {
 }
 
 pub fn spawn() {
+    // Continuous-mode poll thread. Idles until mode==2 and the hook is installed.
+    std::thread::spawn(continuous_poll_loop);
+
     std::thread::spawn(|| {
         // xinput is usually loaded lazily on first controller poll — poll for it.
         for _ in 0..600 {

@@ -37,8 +37,9 @@ use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, 
 pub struct Tray {
     _icon: TrayIcon,
     enabled: CheckMenuItem,
-    mode_block: CheckMenuItem,
     mode_defer: CheckMenuItem,
+    mode_block: CheckMenuItem,
+    mode_continuous: CheckMenuItem,
     w3: CheckMenuItem,
     w5: CheckMenuItem,
     w8: CheckMenuItem,
@@ -49,9 +50,10 @@ impl Tray {
     pub fn refresh_checks(&self) {
         let s = state();
         self.enabled.set_checked(s.enabled.load(Ordering::Relaxed) != 0);
-        let block = s.block_in_frame.load(Ordering::Relaxed) != 0;
-        self.mode_block.set_checked(block);
-        self.mode_defer.set_checked(!block);
+        let mode = s.mode.load(Ordering::Relaxed);
+        self.mode_defer.set_checked(mode == 0);
+        self.mode_block.set_checked(mode == 1);
+        self.mode_continuous.set_checked(mode == 2);
         let w = s.window_ms.load(Ordering::Relaxed);
         self.w3.set_checked(w == 3);
         self.w5.set_checked(w == 5);
@@ -81,18 +83,20 @@ pub fn spawn(ctx: egui::Context) -> Option<Tray> {
     let s0 = state();
     let cur_w = s0.window_ms.load(Ordering::Relaxed);
 
-    let block_on = s0.block_in_frame.load(Ordering::Relaxed) != 0;
+    let mode0 = s0.mode.load(Ordering::Relaxed);
     let open = MenuItem::new("Open NOBD", true, None);
     let enabled = CheckMenuItem::new("Sync enabled", true, s0.enabled.load(Ordering::Relaxed) != 0, None);
-    let mode_block = CheckMenuItem::new("Mode: Block (offline)", true, block_on, None);
-    let mode_defer = CheckMenuItem::new("Mode: Defer (online-safe)", true, !block_on, None);
+    let mode_defer = CheckMenuItem::new("Mode: Defer (online-safe)", true, mode0 == 0, None);
+    let mode_block = CheckMenuItem::new("Mode: Block (offline)", true, mode0 == 1, None);
+    let mode_continuous = CheckMenuItem::new("Mode: Continuous (1kHz)", true, mode0 == 2, None);
     let w3 = CheckMenuItem::new("Window: 3 ms", true, cur_w == 3, None);
     let w5 = CheckMenuItem::new("Window: 5 ms", true, cur_w == 5, None);
     let w8 = CheckMenuItem::new("Window: 8 ms", true, cur_w == 8, None);
     let quit = MenuItem::new("Quit NOBD", true, None);
 
     let (id_open, id_enabled) = (open.id().clone(), enabled.id().clone());
-    let (id_block, id_defer) = (mode_block.id().clone(), mode_defer.id().clone());
+    let (id_defer, id_block, id_continuous) =
+        (mode_defer.id().clone(), mode_block.id().clone(), mode_continuous.id().clone());
     let (id_w3, id_w5, id_w8, id_quit) =
         (w3.id().clone(), w5.id().clone(), w8.id().clone(), quit.id().clone());
 
@@ -100,8 +104,11 @@ pub fn spawn(ctx: egui::Context) -> Option<Tray> {
     menu.append(&open).ok()?;
     menu.append(&PredefinedMenuItem::separator()).ok()?;
     menu.append(&enabled).ok()?;
-    menu.append(&mode_block).ok()?;
-    menu.append(&mode_defer).ok()?;
+    // Continuous-only: Defer/Block items still exist (and their handlers below)
+    // but are not shown. Re-append these to restore the multi-mode menu.
+    // menu.append(&mode_defer).ok()?;
+    // menu.append(&mode_block).ok()?;
+    menu.append(&mode_continuous).ok()?;
     menu.append(&PredefinedMenuItem::separator()).ok()?;
     menu.append(&w3).ok()?;
     menu.append(&w5).ok()?;
@@ -145,9 +152,14 @@ pub fn spawn(ctx: egui::Context) -> Option<Tray> {
                 } else if ev.id == id_enabled {
                     let v = s.enabled.load(Ordering::Relaxed) == 0;
                     s.enabled.store(v as u32, Ordering::Relaxed);
-                } else if ev.id == id_block {
-                    s.block_in_frame.store(1, Ordering::Relaxed);
                 } else if ev.id == id_defer {
+                    s.mode.store(0, Ordering::Relaxed);
+                    s.block_in_frame.store(0, Ordering::Relaxed);
+                } else if ev.id == id_block {
+                    s.mode.store(1, Ordering::Relaxed);
+                    s.block_in_frame.store(1, Ordering::Relaxed);
+                } else if ev.id == id_continuous {
+                    s.mode.store(2, Ordering::Relaxed);
                     s.block_in_frame.store(0, Ordering::Relaxed);
                 } else if ev.id == id_w3 {
                     s.window_ms.store(3, Ordering::Relaxed);
@@ -165,5 +177,5 @@ pub fn spawn(ctx: egui::Context) -> Option<Tray> {
         }
     });
 
-    Some(Tray { _icon: tray, enabled, mode_block, mode_defer, w3, w5, w8 })
+    Some(Tray { _icon: tray, enabled, mode_defer, mode_block, mode_continuous, w3, w5, w8 })
 }

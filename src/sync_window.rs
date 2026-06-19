@@ -24,11 +24,17 @@ pub const SYNC_WINDOW_MS: u128 = 5;
 pub struct SyncWindow {
     committed: u16,                   // == debouncedGpio (synced bits only)
     pending: Option<(Instant, u16)>,  // (window_start, sync_new)
+    // Record frame-boundary saves from here? True for Defer (this runs at the
+    // game's per-frame read cadence, so a window spanning two calls == two
+    // frames == a real split). False for Continuous, where this runs at ~1kHz
+    // and "spanning two polls" only means >1ms apart, NOT a frame straddle —
+    // there the hook counts saves accurately instead.
+    pub record_saves: bool,
 }
 
 impl Default for SyncWindow {
     fn default() -> Self {
-        Self { committed: 0, pending: None }
+        Self { committed: 0, pending: None, record_saves: true }
     }
 }
 
@@ -81,6 +87,11 @@ impl SyncWindow {
                 start = Some(Instant::now());
                 sync_new = just_pressed;
             } else {
+                // A partner is joining an already-open window — the elapsed time
+                // is the measured finger gap between the lead and this press.
+                if let Some(t) = start {
+                    crate::config::record_gap(t.elapsed().as_micros() as u64);
+                }
                 sync_new |= just_pressed;
             }
         }
@@ -100,7 +111,7 @@ impl SyncWindow {
                 // Frame-boundary save: a grouped commit whose lead press was
                 // already pending from a prior poll → the partner arrived on a
                 // later frame. (Same-poll already-grouped presses don't count.)
-                if grouped && was_pending {
+                if grouped && was_pending && self.record_saves {
                     crate::config::record_save();
                 }
                 sync_new = 0;

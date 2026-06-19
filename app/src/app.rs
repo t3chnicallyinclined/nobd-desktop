@@ -368,35 +368,39 @@ fn draw_nobd_sync(ctx: &egui::Context) {
             s.enabled.store(enabled as u32, Ordering::Relaxed);
         }
 
-        // ── Latch mode: Block (offline best) vs Defer (online-safe) ──
+        // ── Latch mode ──
+        // Continuous is now the only mode (best latency + online-safe). Defer and
+        // Block remain implemented in the DLL; the multi-mode selector below is
+        // commented out, not deleted, so they can be re-exposed easily.
         ui.add_space(4.0);
         ui.label(RichText::new("Latch mode").strong());
-        let mut block = s.block_in_frame.load(Ordering::Relaxed) != 0;
+        s.mode.store(2, Ordering::Relaxed); // force Continuous
+        s.block_in_frame.store(0, Ordering::Relaxed);
+        let mode = s.mode.load(Ordering::Relaxed);
+        ui.colored_label(
+            TEAL,
+            "\u{25C9} Continuous: a ~1kHz background thread runs the sync window on its own clock and \
+             the game samples the result \u{2014} like the stick's firmware. No thread stall \
+             (online-safe), and most presses land on the same frame anyway (no unconditional +1 frame). \
+             Watch \u{201C}Poll rate\u{201D} and \u{201C}Waited a frame\u{201D} below.",
+        );
+        /* Multi-mode selector \u{2014} disabled (Continuous-only). Uncomment to restore Defer/Block:
+        let mut mode = s.mode.load(Ordering::Relaxed);
         ui.horizontal(|ui| {
-            if ui.selectable_label(block, RichText::new("  Block  ").size(15.0)).clicked() {
-                block = true;
-                s.block_in_frame.store(1, Ordering::Relaxed);
-            }
-            if ui.selectable_label(!block, RichText::new("  Defer  ").size(15.0)).clicked() {
-                block = false;
-                s.block_in_frame.store(0, Ordering::Relaxed);
+            for (m, label) in [(0u32, "  Defer  "), (1u32, "  Block  "), (2u32, "  Continuous  ")] {
+                if ui.selectable_label(mode == m, RichText::new(label).size(15.0)).clicked() {
+                    mode = m;
+                    s.mode.store(m, Ordering::Relaxed);
+                    s.block_in_frame.store((m == 1) as u32, Ordering::Relaxed);
+                }
             }
         });
-        if block {
-            ui.colored_label(
-                RED,
-                "\u{26A0} Block: OFFLINE ONLY. Holds the game thread a few ms for sub-frame latency \
-                 \u{2014} great in training, but online it disrupts rollback netcode pacing (stagger / \
-                 disconnect risk). Switch to Defer before going online.",
-            );
-        } else {
-            ui.colored_label(
-                GREEN,
-                "\u{2713} Defer: online-safe. Returns instantly, delivers the group next frame \
-                 (+1 frame for a lone press; 0 frames for already-grouped). No thread stall \u{2014} \
-                 safe with rollback netplay.",
-            );
+        match mode {
+            1 => { ui.colored_label(RED, "\u{26A0} Block: OFFLINE ONLY. ..."); }
+            2 => { ui.colored_label(TEAL, "\u{25C9} Continuous: ..."); }
+            _ => { ui.colored_label(GREEN, "\u{2713} Defer: online-safe. ..."); }
         }
+        */
 
         ui.add_space(6.0);
 
@@ -421,6 +425,9 @@ fn draw_nobd_sync(ctx: &egui::Context) {
             s.window_ms.store(win, Ordering::Relaxed);
         }
 
+        // Settle is a Block-only knob (3-button straggler wait); no effect in
+        // Continuous, so it's hidden. Uncomment if Block is re-exposed.
+        /*
         ui.horizontal(|ui| {
             ui.label("Settle (3-button straggler):");
             let mut settle = s.settle_ms.load(Ordering::Relaxed);
@@ -428,6 +435,7 @@ fn draw_nobd_sync(ctx: &egui::Context) {
                 s.settle_ms.store(settle, Ordering::Relaxed);
             }
         });
+        */
 
         ui.add_space(10.0);
         ui.separator();
@@ -441,6 +449,8 @@ fn draw_nobd_sync(ctx: &egui::Context) {
         let (gap_avg, gap_max) = s.finger_gap_ms();
         let rec = s.recommended_window_ms();
         let frame_us = s.frame_us.load(Ordering::Relaxed);
+        let poll_hz = s.poll_hz.load(Ordering::Relaxed);
+        let (gp_avg, gp_max) = s.game_perceived_ms();
 
         // Headline: provable frame-boundary saves (a lone attack read by the
         // poll whose partner arrived before the next poll → would have split).
@@ -448,11 +458,13 @@ fn draw_nobd_sync(ctx: &egui::Context) {
             ui.label(RichText::new(format!("{saves}")).size(34.0).strong().color(GREEN));
             ui.vertical(|ui| {
                 ui.label(RichText::new("frame-boundary splits caught").size(15.0));
-                let rate = if groups + saves > 0 {
-                    saves as f64 / (groups + saves) as f64 * 100.0
+                // saves ⊆ groups (a save is a group that crossed a frame), so the
+                // rate is saves / groups.
+                let rate = if groups > 0 {
+                    saves as f64 / groups as f64 * 100.0
                 } else { 0.0 };
                 ui.weak(format!(
-                    "{rate:.0}% of multi-button inputs straddled the 60Hz poll and were regrouped"
+                    "{rate:.0}% of grouped inputs would have split across a frame without NOBD"
                 ));
             });
         });
@@ -496,7 +508,7 @@ fn draw_nobd_sync(ctx: &egui::Context) {
             ui.label("Singles (solo press):");
             ui.label(format!("{singles}"));
             ui.end_row();
-            ui.label("Added latency:");
+            ui.label("Grouping hold (lead wait):");
             ui.colored_label(
                 if lat_avg < 2.0 { GREEN } else if lat_avg < 5.0 { YELLOW } else { ORANGE },
                 format!("avg {lat_avg:.1} ms   max {lat_max:.1} ms"),
@@ -506,7 +518,7 @@ fn draw_nobd_sync(ctx: &egui::Context) {
             if gap_max > 0.0 {
                 ui.label(format!("avg {gap_avg:.1} ms   max {gap_max:.1} ms"));
             } else {
-                ui.weak("— (do some dashes in block mode)");
+                ui.weak("— (do a few dashes / 2-button inputs)");
             }
             ui.end_row();
             ui.label("Game frame time:");
@@ -521,6 +533,45 @@ fn draw_nobd_sync(ctx: &egui::Context) {
                 ui.weak("—");
             }
             ui.end_row();
+
+            // Continuous-mode health + the headline latency number.
+            if mode == 2 {
+                ui.label("Poll rate:");
+                if poll_hz > 0 {
+                    ui.colored_label(
+                        if poll_hz >= 500 { GREEN } else { ORANGE },
+                        format!("{poll_hz} Hz"),
+                    );
+                } else {
+                    ui.weak("— (start the game / press a button)");
+                }
+                ui.end_row();
+
+                ui.label("Input latency (press\u{2192}game):");
+                if gp_max > 0.0 {
+                    ui.colored_label(
+                        if gp_avg < 8.0 { GREEN } else if gp_avg < 16.0 { YELLOW } else { ORANGE },
+                        format!("avg {gp_avg:.1} ms   max {gp_max:.1} ms"),
+                    );
+                } else {
+                    ui.weak("— (press an attack)");
+                }
+                ui.end_row();
+
+                ui.label("Waited a frame:");
+                let waits = s.frame_waits.load(Ordering::Relaxed);
+                let dels = s.gp_lat_count.load(Ordering::Relaxed);
+                if dels > 0 {
+                    let pct = waits as f64 / dels as f64 * 100.0;
+                    ui.colored_label(
+                        if pct < 35.0 { GREEN } else if pct < 60.0 { YELLOW } else { ORANGE },
+                        format!("{waits} of {dels}  ({pct:.0}%)"),
+                    );
+                } else {
+                    ui.weak("—");
+                }
+                ui.end_row();
+            }
         });
 
         ui.add_space(8.0);
@@ -545,10 +596,11 @@ fn draw_nobd_sync(ctx: &egui::Context) {
         ui.separator();
         ui.label(RichText::new("How it works").strong());
         ui.label(
-            "Block mode holds the game's input read open for a few ms so near-simultaneous \
-             attacks land on the same frame, then returns instantly. Already-grouped presses \
-             pass through in ~1ms; the window only applies to a lone press waiting for a partner. \
-             Directions are never delayed (motion inputs stay frame-tight).",
+            "A ~1kHz background thread reads your stick continuously and runs the sync window on \
+             its own clock, just like the controller's firmware. The game samples the already-grouped \
+             result whenever it reads \u{2014} no thread stall (online-safe). Near-simultaneous attacks \
+             land on the same frame; a lone press only costs a frame if it lands in the last few ms \
+             before a read (see \u{201C}Waited a frame\u{201D}). Directions are never delayed.",
         );
     });
 }

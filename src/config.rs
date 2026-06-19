@@ -15,6 +15,27 @@ use nobd_shared::state;
 #[inline] pub fn block_in_frame() -> bool { state().block_in_frame.load(Ordering::Relaxed) != 0 }
 #[inline] pub fn set_block(v: bool) { state().block_in_frame.store(v as u32, Ordering::Relaxed); }
 
+// Latch mode: 0 = Defer, 1 = Block, 2 = Continuous.
+#[inline] pub fn mode() -> u32 { state().mode.load(Ordering::Relaxed) }
+#[inline] pub fn set_mode(m: u32) { state().mode.store(m, Ordering::Relaxed); }
+
+#[inline] pub fn set_poll_hz(hz: u32) { state().poll_hz.store(hz, Ordering::Relaxed); }
+
+// Game-perceived input latency: physical press → first game read that sees it.
+#[inline]
+pub fn record_gp_latency(us: u64) {
+    let s = state();
+    s.gp_lat_sum_us.fetch_add(us, Ordering::Relaxed);
+    s.gp_lat_max_us.fetch_max(us, Ordering::Relaxed);
+    s.gp_lat_count.fetch_add(1, Ordering::Relaxed);
+}
+#[inline] pub fn game_perceived_ms() -> (f64, f64) { state().game_perceived_ms() }
+
+// Deliveries that cost at least one game frame (press withheld across a read).
+#[inline] pub fn record_frame_wait() { state().frame_waits.fetch_add(1, Ordering::Relaxed); }
+#[inline] pub fn frame_waits() -> u64 { state().frame_waits.load(Ordering::Relaxed) }
+#[inline] pub fn gp_count() -> u64 { state().gp_lat_count.load(Ordering::Relaxed) }
+
 #[inline] pub fn directions_windowed() -> bool { state().directions_windowed.load(Ordering::Relaxed) != 0 }
 #[inline] pub fn set_directions(v: bool) { state().directions_windowed.store(v as u32, Ordering::Relaxed); }
 
@@ -50,9 +71,9 @@ pub fn record_latency(us: u64) {
     let n = s.lat_count.fetch_add(1, Ordering::Relaxed) + 1;
     if n % 10 == 0 && n <= 2000 {
         let (avg, max) = s.latency_ms();
-        let mode = if block_in_frame() { "BLOCK" } else { "defer" };
+        let label = match mode() { 1 => "BLOCK", 2 => "contin", _ => "defer" };
         crate::log::log(&format!(
-            "LATENCY[{mode}] this={:.1}ms  avg={avg:.1}ms  max={max:.1}ms  (n={n}, window={}ms)",
+            "LATENCY[{label}] this={:.1}ms  avg={avg:.1}ms  max={max:.1}ms  (n={n}, window={}ms)",
             us as f64 / 1000.0, window_ms_u32(),
         ));
     }
