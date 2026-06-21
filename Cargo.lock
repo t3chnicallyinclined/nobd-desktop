@@ -585,17 +585,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "egui_plot"
-version = "0.34.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "67fc9b427a837264e55381a5cade6e28fe83ac5b165a61b9c888548c732a9c95"
-dependencies = [
- "ahash",
- "egui",
- "emath",
-]
-
-[[package]]
 name = "emath"
 version = "0.33.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1693,11 +1682,10 @@ dependencies = [
 
 [[package]]
 name = "nobd-app"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "eframe",
  "egui",
- "egui_plot",
  "gilrs",
  "nobd-shared",
  "tray-icon",
@@ -1707,7 +1695,7 @@ dependencies = [
 
 [[package]]
 name = "nobd-desktop"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "nobd-shared",
  "retour",
@@ -1716,7 +1704,7 @@ dependencies = [
 
 [[package]]
 name = "nobd-shared"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "windows-sys 0.52.0",
 ]
