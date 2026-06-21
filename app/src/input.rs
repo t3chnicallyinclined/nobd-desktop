@@ -1,4 +1,4 @@
-use gilrs::{Button, EventType, Gilrs};
+use gilrs::{Button, EventType, GamepadId, Gilrs};
 use std::collections::HashMap;
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
@@ -6,14 +6,14 @@ use std::time::{Duration, Instant};
 
 const PAIR_WINDOW_MS: f64 = 50.0;
 const BOUNCE_THRESHOLD_MS: f64 = 5.0;
-/// Poll gilrs every 0.125ms (~8kHz) — fast enough to separate events
-/// across different USB frames (1ms apart) while keeping CPU usage low.
+/// Poll gilrs every 0.125ms (~8kHz).
 const POLL_INTERVAL: Duration = Duration::from_micros(125);
 
 pub struct ButtonPair {
     pub button_a: Button,
     pub button_b: Button,
     pub gap_ms: f64,
+    pub controller: usize,
 }
 
 pub struct StrayPress {
@@ -21,6 +21,7 @@ pub struct StrayPress {
     pub solo_ms: f64,
     pub reason: StrayReason,
     pub off_time_ms: Option<f64>,
+    pub controller: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -41,6 +42,7 @@ impl StrayReason {
 pub struct BounceEvent {
     pub button: Button,
     pub off_ms: f64,
+    pub controller: usize,
 }
 
 #[derive(Clone)]
@@ -50,9 +52,9 @@ pub enum InputEvent {
 }
 
 enum InputMsg {
-    Pressed(Button, Instant),
-    Released(Button, Instant),
-    GamepadName(Option<String>),
+    Pressed(GamepadId, Button, Instant),
+    Released(GamepadId, Button, Instant),
+    Gamepads(Vec<(GamepadId, String)>),
 }
 
 struct PendingPress {
@@ -70,8 +72,29 @@ impl ButtonKey {
     }
 }
 
+/// Per-controller pairing state.
+struct PadState {
+    pending: Option<PendingPress>,
+    last_release: HashMap<ButtonKey, Instant>,
+    last_press: HashMap<ButtonKey, Instant>,
+}
+
+impl PadState {
+    fn new() -> Self {
+        Self { pending: None, last_release: HashMap::new(), last_press: HashMap::new() }
+    }
+
+    fn off_time_ms(&self, button: Button) -> Option<f64> {
+        let key = ButtonKey::from_button(button);
+        let release = self.last_release.get(&key)?;
+        let press = self.last_press.get(&key)?;
+        let off = press.duration_since(*release).as_secs_f64() * 1000.0;
+        if off >= 0.0 { Some(off) } else { None }
+    }
+}
+
 pub struct PollResult {
-    pub pair: Option<ButtonPair>,
+    pub pairs: Vec<ButtonPair>,
     pub strays: Vec<StrayPress>,
     pub bounces: Vec<BounceEvent>,
     pub events: Vec<InputEvent>,
@@ -79,12 +102,9 @@ pub struct PollResult {
 
 pub struct GamepadInput {
     rx: Receiver<InputMsg>,
-    pending: Option<PendingPress>,
-    gamepad_name: Option<String>,
-    /// Per-button last release time for off-time + bounce tracking.
-    last_release: HashMap<ButtonKey, Instant>,
-    /// Per-button last press time for off-time on strays.
-    last_press: HashMap<ButtonKey, Instant>,
+    idx_of: HashMap<GamepadId, usize>,
+    pads: Vec<PadState>,
+    names: Vec<String>,
 }
 
 impl GamepadInput {
@@ -104,49 +124,40 @@ impl GamepadInput {
                 }
             };
 
-            // Force immediate gamepad name check on first iteration
             let mut last_name_check = Instant::now() - Duration::from_secs(10);
 
             loop {
-                // Periodically send gamepad connection status
+                // Periodically send the full connected-gamepad list (id + name).
                 if last_name_check.elapsed() >= Duration::from_secs(1) {
-                    let name = gilrs
+                    let list: Vec<(GamepadId, String)> = gilrs
                         .gamepads()
-                        .next()
-                        .map(|(_, gp)| gp.name().to_string());
-                    if tx.send(InputMsg::GamepadName(name)).is_err() {
-                        return; // UI thread dropped, exit
+                        .map(|(id, gp)| (id, gp.name().to_string()))
+                        .collect();
+                    if tx.send(InputMsg::Gamepads(list)).is_err() {
+                        return;
                     }
                     last_name_check = Instant::now();
                 }
 
-                // Process events — only ONE ButtonPressed per cycle.
-                // When gilrs (XInput) detects two state changes in one poll,
-                // it buffers both events. By taking only one press and sleeping,
-                // the second press gets its own timestamp on the next cycle.
-                // Events from different USB frames naturally get different
-                // timestamps because gilrs re-polls the OS when the buffer
-                // is empty.
+                // One press per cycle so two near-simultaneous presses get
+                // distinct timestamps (gilrs re-polls the OS when its buffer empties).
                 loop {
                     match gilrs.next_event() {
                         Some(event) => match event.event {
                             EventType::ButtonPressed(button, _) => {
-                                if tx
-                                    .send(InputMsg::Pressed(button, Instant::now()))
-                                    .is_err()
-                                {
+                                if tx.send(InputMsg::Pressed(event.id, button, Instant::now())).is_err() {
                                     return;
                                 }
-                                break; // One press per cycle
+                                break;
                             }
                             EventType::ButtonReleased(button, _) => {
-                                if tx.send(InputMsg::Released(button, Instant::now())).is_err() {
+                                if tx.send(InputMsg::Released(event.id, button, Instant::now())).is_err() {
                                     return;
                                 }
                             }
                             _ => {}
                         },
-                        None => break, // No more events
+                        None => break,
                     }
                 }
 
@@ -154,33 +165,36 @@ impl GamepadInput {
             }
         });
 
-        // Wait for init result from thread
         match init_rx.recv() {
             Ok(Ok(())) => Ok(Self {
                 rx,
-                pending: None,
-                gamepad_name: None,
-                last_release: HashMap::new(),
-                last_press: HashMap::new(),
+                idx_of: HashMap::new(),
+                pads: Vec::new(),
+                names: Vec::new(),
             }),
             Ok(Err(e)) => Err(e),
             Err(_) => Err("Input thread died during init".to_string()),
         }
     }
 
-    /// Calculate off-time for a button (time since last release → this press).
-    fn off_time_ms(&self, button: Button) -> Option<f64> {
-        let key = ButtonKey::from_button(button);
-        let release = self.last_release.get(&key)?;
-        let press = self.last_press.get(&key)?;
-        let off = press.duration_since(*release).as_secs_f64() * 1000.0;
-        if off >= 0.0 { Some(off) } else { None }
+    /// Stable 0-based index for a gamepad id (assigns one on first sight).
+    fn index_of(&mut self, id: GamepadId) -> usize {
+        if let Some(&i) = self.idx_of.get(&id) {
+            return i;
+        }
+        let i = self.pads.len();
+        self.idx_of.insert(id, i);
+        self.pads.push(PadState::new());
+        if self.names.len() <= i {
+            self.names.resize(i + 1, String::new());
+        }
+        i
     }
 
-    /// Receive timestamped events from the input thread and detect pairs/strays/bounces.
+    /// Receive timestamped events and detect pairs/strays/bounces, per controller.
     pub fn poll(&mut self) -> PollResult {
         let mut result = PollResult {
-            pair: None,
+            pairs: Vec::new(),
             strays: Vec::new(),
             bounces: Vec::new(),
             events: Vec::new(),
@@ -188,106 +202,126 @@ impl GamepadInput {
 
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
-                InputMsg::Pressed(button, timestamp) => {
+                InputMsg::Gamepads(list) => {
+                    for (id, name) in list {
+                        let i = self.index_of(id);
+                        if self.names.len() <= i {
+                            self.names.resize(i + 1, String::new());
+                        }
+                        self.names[i] = name;
+                    }
+                }
+                InputMsg::Pressed(id, button, timestamp) => {
+                    let c = self.index_of(id);
                     result.events.push(InputEvent::Pressed(button));
                     let key = ButtonKey::from_button(button);
+                    let pad = &mut self.pads[c];
 
-                    // Bounce detection: re-press very quickly after release
-                    if let Some(&rel_time) = self.last_release.get(&key) {
+                    if let Some(&rel_time) = pad.last_release.get(&key) {
                         let off_ms = timestamp.duration_since(rel_time).as_secs_f64() * 1000.0;
                         if off_ms < BOUNCE_THRESHOLD_MS {
-                            result.bounces.push(BounceEvent {
-                                button,
-                                off_ms,
-                            });
+                            result.bounces.push(BounceEvent { button, off_ms, controller: c });
                         }
                     }
+                    pad.last_press.insert(key, timestamp);
 
-                    // Record press time for off-time tracking
-                    self.last_press.insert(key, timestamp);
-
-                    match self.pending.take() {
+                    match pad.pending.take() {
                         None => {
-                            self.pending = Some(PendingPress { button, timestamp });
+                            pad.pending = Some(PendingPress { button, timestamp });
                         }
                         Some(pending) => {
                             if pending.button == button {
-                                // Same button pressed again — refresh timestamp
-                                self.pending = Some(PendingPress { button, timestamp });
+                                pad.pending = Some(PendingPress { button, timestamp });
                             } else {
-                                let gap_ms = timestamp
-                                    .duration_since(pending.timestamp)
-                                    .as_secs_f64()
-                                    * 1000.0;
-
+                                let gap_ms =
+                                    timestamp.duration_since(pending.timestamp).as_secs_f64() * 1000.0;
                                 if gap_ms <= PAIR_WINDOW_MS {
-                                    // Pair detected
-                                    result.pair = Some(ButtonPair {
+                                    result.pairs.push(ButtonPair {
                                         button_a: pending.button,
                                         button_b: button,
                                         gap_ms,
+                                        controller: c,
                                     });
                                 } else {
-                                    // Gap too large — old pending is a stray
+                                    let off = pad.off_time_ms(pending.button);
                                     result.strays.push(StrayPress {
                                         button: pending.button,
                                         solo_ms: gap_ms,
                                         reason: StrayReason::NoPairArrived,
-                                        off_time_ms: self.off_time_ms(pending.button),
+                                        off_time_ms: off,
+                                        controller: c,
                                     });
-                                    self.pending = Some(PendingPress { button, timestamp });
+                                    pad.pending = Some(PendingPress { button, timestamp });
                                 }
                             }
                         }
                     }
                 }
-                InputMsg::Released(button, timestamp) => {
+                InputMsg::Released(id, button, timestamp) => {
+                    let c = self.index_of(id);
                     result.events.push(InputEvent::Released(button));
                     let key = ButtonKey::from_button(button);
-                    self.last_release.insert(key, timestamp);
+                    self.pads[c].last_release.insert(key, timestamp);
 
-                    // If the released button is the pending press, it's a stray
-                    if let Some(ref pending) = self.pending {
+                    let off = self.pads[c].off_time_ms(button);
+                    let pad = &mut self.pads[c];
+                    if let Some(ref pending) = pad.pending {
                         if pending.button == button {
-                            let solo_ms = timestamp
-                                .duration_since(pending.timestamp)
-                                .as_secs_f64()
-                                * 1000.0;
+                            let solo_ms =
+                                timestamp.duration_since(pending.timestamp).as_secs_f64() * 1000.0;
                             result.strays.push(StrayPress {
                                 button,
                                 solo_ms,
                                 reason: StrayReason::ReleasedBeforePair,
-                                off_time_ms: self.off_time_ms(button),
+                                off_time_ms: off,
+                                controller: c,
                             });
-                            self.pending = None;
+                            pad.pending = None;
                         }
                     }
-                }
-                InputMsg::GamepadName(name) => {
-                    self.gamepad_name = name;
                 }
             }
         }
 
-        // Expire stale pending press → stray
-        if let Some(ref pending) = self.pending {
-            let elapsed_ms = pending.timestamp.elapsed().as_secs_f64() * 1000.0;
-            if elapsed_ms > PAIR_WINDOW_MS {
+        // Expire stale pending presses → strays (per controller).
+        for (c, pad) in self.pads.iter_mut().enumerate() {
+            let expire = pad
+                .pending
+                .as_ref()
+                .map(|p| p.timestamp.elapsed().as_secs_f64() * 1000.0)
+                .filter(|&ms| ms > PAIR_WINDOW_MS);
+            if let Some(solo_ms) = expire {
+                let button = pad.pending.as_ref().unwrap().button;
+                let off = pad.off_time_ms(button);
                 result.strays.push(StrayPress {
-                    button: pending.button,
-                    solo_ms: elapsed_ms,
+                    button,
+                    solo_ms,
                     reason: StrayReason::NoPairArrived,
-                    off_time_ms: self.off_time_ms(pending.button),
+                    off_time_ms: off,
+                    controller: c,
                 });
-                self.pending = None;
+                pad.pending = None;
             }
         }
 
         result
     }
 
+    /// Connected controllers as (index, name), index = the stable controller slot.
+    pub fn controllers(&self) -> Vec<(usize, String)> {
+        self.names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| {
+                let name = if n.is_empty() { format!("Controller {}", i + 1) } else { n.clone() };
+                (i, name)
+            })
+            .collect()
+    }
+
+    /// Name of the first connected controller (for the header status line).
     pub fn connected_gamepad_name(&self) -> Option<String> {
-        self.gamepad_name.clone()
+        self.names.iter().find(|n| !n.is_empty()).cloned()
     }
 }
 

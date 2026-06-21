@@ -46,6 +46,7 @@ enum Tab {
 
 enum GapLogEntry {
     Pair {
+        controller: usize,
         attempt: usize,
         button_a: String,
         button_b: String,
@@ -54,12 +55,14 @@ enum GapLogEntry {
         pre_fire: bool,
     },
     Stray {
+        controller: usize,
         button: String,
         solo_ms: f64,
         reason: &'static str,
         off_time_ms: Option<f64>,
     },
     Bounce {
+        controller: usize,
         button: String,
         off_ms: f64,
     },
@@ -67,10 +70,12 @@ enum GapLogEntry {
 
 pub struct FingerGapApp {
     input: Option<GamepadInput>,
-    stats: GapStats,
+    // Per-controller finger-gap stats / counts (index = controller slot).
+    stats: Vec<GapStats>,
+    stray_counts: Vec<usize>,
+    bounce_counts: Vec<usize>,
+    gap_sel: usize, // which controller the Gap Tester tab is viewing
     gap_log: Vec<GapLogEntry>,
-    stray_count: usize,
-    bounce_count: usize,
     monitor: ButtonMonitor,
     active_tab: Tab,
     error_msg: Option<String>,
@@ -93,10 +98,11 @@ impl FingerGapApp {
             .unwrap_or_default();
         Self {
             input,
-            stats: GapStats::new(),
+            stats: Vec::new(),
+            stray_counts: Vec::new(),
+            bounce_counts: Vec::new(),
+            gap_sel: 0,
             gap_log: Vec::new(),
-            stray_count: 0,
-            bounce_count: 0,
             monitor: ButtonMonitor::new(),
             active_tab: Tab::NobdSync,
             error_msg,
@@ -109,6 +115,22 @@ impl FingerGapApp {
 }
 
 impl FingerGapApp {
+    /// Grow the per-controller vectors so index `c` is valid.
+    fn ensure_pad(&mut self, c: usize) {
+        if self.stats.len() <= c {
+            self.stats.resize_with(c + 1, GapStats::new);
+            self.stray_counts.resize(c + 1, 0);
+            self.bounce_counts.resize(c + 1, 0);
+        }
+    }
+
+    fn push_log(&mut self, entry: GapLogEntry) {
+        self.gap_log.push(entry);
+        if self.gap_log.len() > LOG_MAX {
+            self.gap_log.remove(0);
+        }
+    }
+
     fn draw_install(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.add_space(6.0);
@@ -223,60 +245,53 @@ impl eframe::App for FingerGapApp {
             tray.refresh_checks();
         }
 
-        // Poll gamepad - get pair detection + strays + bounces + raw events
-        if let Some(ref mut input) = self.input {
-            let result = input.poll();
-
-            // Feed raw events to button monitor
+        // Poll gamepad — pairs/strays/bounces are tagged per controller now.
+        let poll = self.input.as_mut().map(|i| i.poll());
+        if let Some(result) = poll {
             for ev in &result.events {
                 match ev {
                     InputEvent::Pressed(btn) => self.monitor.on_press(*btn),
                     InputEvent::Released(btn) => self.monitor.on_release(*btn),
                 }
             }
-
-            // Record gap pair
-            if let Some(pair) = result.pair {
-                self.stats.record(pair.gap_ms);
-                let avg = self.stats.average();
+            for pair in result.pairs {
+                let c = pair.controller;
+                self.ensure_pad(c);
+                self.stats[c].record(pair.gap_ms);
+                let running_avg = self.stats[c].average();
+                let attempt = self.stats[c].count();
                 let pre_fire = pair.gap_ms >= 1.0;
-                self.gap_log.push(GapLogEntry::Pair {
-                    attempt: self.stats.count(),
+                self.push_log(GapLogEntry::Pair {
+                    controller: c,
+                    attempt,
                     button_a: format_button(pair.button_a),
                     button_b: format_button(pair.button_b),
                     gap_ms: pair.gap_ms,
-                    running_avg: avg,
+                    running_avg,
                     pre_fire,
                 });
-                if self.gap_log.len() > LOG_MAX {
-                    self.gap_log.remove(0);
-                }
             }
-
-            // Record strays
             for stray in result.strays {
-                self.stray_count += 1;
-                self.gap_log.push(GapLogEntry::Stray {
+                let c = stray.controller;
+                self.ensure_pad(c);
+                self.stray_counts[c] += 1;
+                self.push_log(GapLogEntry::Stray {
+                    controller: c,
                     button: format_button(stray.button),
                     solo_ms: stray.solo_ms,
                     reason: stray.reason.label(),
                     off_time_ms: stray.off_time_ms,
                 });
-                if self.gap_log.len() > LOG_MAX {
-                    self.gap_log.remove(0);
-                }
             }
-
-            // Record bounces
             for bounce in result.bounces {
-                self.bounce_count += 1;
-                self.gap_log.push(GapLogEntry::Bounce {
+                let c = bounce.controller;
+                self.ensure_pad(c);
+                self.bounce_counts[c] += 1;
+                self.push_log(GapLogEntry::Bounce {
+                    controller: c,
                     button: format_button(bounce.button),
                     off_ms: bounce.off_ms,
                 });
-                if self.gap_log.len() > LOG_MAX {
-                    self.gap_log.remove(0);
-                }
             }
         }
 
@@ -301,11 +316,11 @@ impl eframe::App for FingerGapApp {
                 ui.heading(RichText::new("NOBD INPUT TESTER").strong());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("Reset").clicked() {
-                        // Local gap-tester stats…
+                        // Local gap-tester stats (all controllers)…
                         self.stats.clear();
+                        self.stray_counts.clear();
+                        self.bounce_counts.clear();
                         self.gap_log.clear();
-                        self.stray_count = 0;
-                        self.bounce_count = 0;
                         self.monitor.clear();
                         // …and the live in-game (shared-memory) NOBD stats.
                         nobd_shared::state().reset_stats();
@@ -374,13 +389,7 @@ impl eframe::App for FingerGapApp {
 
         match self.active_tab {
             Tab::NobdSync => draw_nobd_sync(ctx, hook_live, dll_installed),
-            Tab::GapTester => draw_gap_tester(
-                ctx,
-                &self.stats,
-                &self.gap_log,
-                self.stray_count,
-                self.bounce_count,
-            ),
+            Tab::GapTester => self.draw_gap_tester(ctx),
             Tab::ButtonMonitor => draw_button_monitor(ctx, &self.monitor),
             Tab::Install => self.draw_install(ctx),
         }
@@ -702,18 +711,27 @@ fn draw_nobd_sync(ctx: &egui::Context, hook_live: bool, dll_installed: bool) {
 
 // ─── GAP TESTER TAB ───
 
-fn draw_gap_tester(
-    ctx: &egui::Context,
-    stats: &GapStats,
-    log: &[GapLogEntry],
-    stray_count: usize,
-    bounce_count: usize,
-) {
+impl FingerGapApp {
+fn draw_gap_tester(&mut self, ctx: &egui::Context) {
+    let controllers = self
+        .input
+        .as_ref()
+        .map(|i| i.controllers())
+        .unwrap_or_default();
+    let sel = self.gap_sel.min(self.stats.len().saturating_sub(1).max(0));
+    let mut clicked_sel: Option<usize> = None;
+
+    let empty = GapStats::new();
+    let stats: &GapStats = self.stats.get(sel).unwrap_or(&empty);
+    let stray_count = self.stray_counts.get(sel).copied().unwrap_or(0);
+    let bounce_count = self.bounce_counts.get(sel).copied().unwrap_or(0);
+    let log = &self.gap_log;
+
     egui::TopBottomPanel::bottom("gap_log")
         .min_height(120.0)
         .resizable(true)
         .show(ctx, |ui| {
-            ui.heading("Event Log");
+            ui.heading("Event Log (all controllers)");
             ui.separator();
             ScrollArea::vertical()
                 .auto_shrink(false)
@@ -721,6 +739,7 @@ fn draw_gap_tester(
                     for entry in log.iter().rev() {
                         match entry {
                             GapLogEntry::Pair {
+                                controller,
                                 attempt,
                                 button_a,
                                 button_b,
@@ -738,11 +757,12 @@ fn draw_gap_tester(
                                     String::new()
                                 };
                                 ui.monospace(format!(
-                                    "#{:>3}  {} + {}  gap: {:5.1}ms  (avg: {:.1}ms){}",
-                                    attempt, button_a, button_b, gap_ms, running_avg, pre_fire_str,
+                                    "[C{}] #{:>3}  {} + {}  gap: {:5.1}ms  (avg: {:.1}ms){}",
+                                    controller + 1, attempt, button_a, button_b, gap_ms, running_avg, pre_fire_str,
                                 ));
                             }
                             GapLogEntry::Stray {
+                                controller,
                                 button,
                                 solo_ms,
                                 reason,
@@ -760,7 +780,7 @@ fn draw_gap_tester(
                                     .show(ui, |ui| {
                                         ui.horizontal(|ui| {
                                             ui.label(
-                                                RichText::new("STRAY")
+                                                RichText::new(format!("C{} STRAY", controller + 1))
                                                     .size(14.0)
                                                     .strong()
                                                     .color(RED),
@@ -775,7 +795,7 @@ fn draw_gap_tester(
                                         });
                                     });
                             }
-                            GapLogEntry::Bounce { button, off_ms } => {
+                            GapLogEntry::Bounce { controller, button, off_ms } => {
                                 egui::Frame::new()
                                     .inner_margin(egui::vec2(8.0, 3.0))
                                     .corner_radius(4.0)
@@ -783,7 +803,7 @@ fn draw_gap_tester(
                                     .show(ui, |ui| {
                                         ui.horizontal(|ui| {
                                             ui.label(
-                                                RichText::new("BOUNCE")
+                                                RichText::new(format!("C{} BOUNCE", controller + 1))
                                                     .size(13.0)
                                                     .strong()
                                                     .color(ORANGE),
@@ -804,6 +824,27 @@ fn draw_gap_tester(
         });
 
     egui::CentralPanel::default().show(ctx, |ui| {
+        // Controller selector — each pad is paired/measured independently.
+        if controllers.len() > 1 {
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Controller:").strong());
+                for (i, name) in &controllers {
+                    if ui
+                        .selectable_label(sel == *i, format!("C{}", i + 1))
+                        .on_hover_text(name)
+                        .clicked()
+                    {
+                        clicked_sel = Some(*i);
+                    }
+                }
+                if let Some((_, name)) = controllers.iter().find(|(i, _)| *i == sel) {
+                    ui.weak(format!("— testing {name}"));
+                }
+            });
+            ui.separator();
+        }
+
         if stats.count() > 0 || stray_count > 0 {
             ui.add_space(8.0);
 
@@ -1059,6 +1100,11 @@ fn draw_gap_tester(
             });
         });
     });
+
+    if let Some(ns) = clicked_sel {
+        self.gap_sel = ns;
+    }
+}
 }
 
 // ─── BUTTON MONITOR TAB ───
