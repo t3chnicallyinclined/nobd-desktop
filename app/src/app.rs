@@ -97,12 +97,17 @@ fn draw_player_live(
         ui.end_row();
     });
 
+    // This player's own sync window.
+    let mut win = s.window_ms[p].load(Ordering::Relaxed);
+    if ui.add(egui::Slider::new(&mut win, 1..=16).suffix(" ms").text("window")).changed() {
+        s.window_ms[p].store(win, Ordering::Relaxed);
+    }
     if rec > 0 {
         ui.horizontal(|ui| {
-            ui.label("Rec window:");
+            ui.label("Rec:");
             ui.colored_label(rec_color(rec), RichText::new(format!("{rec} ms")).strong());
             if ui.small_button("Apply").clicked() {
-                s.window_ms.store(rec, Ordering::Relaxed);
+                s.window_ms[p].store(rec, Ordering::Relaxed);
             }
         });
     }
@@ -556,17 +561,13 @@ fn draw_nobd_sync(ctx: &egui::Context, hook_live: bool, dll_installed: bool) {
 
         ui.add_space(8.0);
 
-        // ── Window size ──
+        // ── Window size (per player — each gets its own slider in the columns below) ──
         ui.label(RichText::new("Sync window").strong());
-        let mut win = s.window_ms.load(Ordering::Relaxed);
-        if ui.add(egui::Slider::new(&mut win, 1..=16).suffix(" ms")).changed() {
-            s.window_ms.store(win, Ordering::Relaxed);
-        }
         ui.weak(
-            "Capped at 16 ms = one frame — the game's original \"same-frame\" window. A larger \
-             window would group presses the game itself would have split across frames (an unfair \
-             reach), so 16 ms is the honest maximum. Bigger is more forgiving (helps loose \
-             execution) but adds latency to a lone press; set it from the Finger Gap Tester.",
+            "Each player sets their own window below. Capped at 16 ms = one frame — the game's \
+             original \"same-frame\" window. A larger window would group presses the game itself \
+             would have split (an unfair reach), so 16 ms is the honest maximum. Bigger is more \
+             forgiving but adds latency to a lone press; set it from each player's finger gap.",
         );
 
         // Settle is a Block-only knob (3-button straggler wait); no effect in

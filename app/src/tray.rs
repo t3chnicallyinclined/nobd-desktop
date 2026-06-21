@@ -54,7 +54,9 @@ impl Tray {
         self.mode_defer.set_checked(mode == 0);
         self.mode_block.set_checked(mode == 1);
         self.mode_continuous.set_checked(mode == 2);
-        let w = s.window_ms.load(Ordering::Relaxed);
+        // Window is per-player now; the quick-set is checked only if all match.
+        let w0 = s.window_ms[0].load(Ordering::Relaxed);
+        let w = if s.window_ms.iter().all(|x| x.load(Ordering::Relaxed) == w0) { w0 } else { 0 };
         self.w3.set_checked(w == 3);
         self.w5.set_checked(w == 5);
         self.w8.set_checked(w == 8);
@@ -81,7 +83,7 @@ fn make_icon() -> Icon {
 
 pub fn spawn(ctx: egui::Context) -> Option<Tray> {
     let s0 = state();
-    let cur_w = s0.window_ms.load(Ordering::Relaxed);
+    let cur_w = s0.window_ms[0].load(Ordering::Relaxed);
 
     let mode0 = s0.mode.load(Ordering::Relaxed);
     let open = MenuItem::new("Open NOBD", true, None);
@@ -162,11 +164,11 @@ pub fn spawn(ctx: egui::Context) -> Option<Tray> {
                     s.mode.store(2, Ordering::Relaxed);
                     s.block_in_frame.store(0, Ordering::Relaxed);
                 } else if ev.id == id_w3 {
-                    s.window_ms.store(3, Ordering::Relaxed);
+                    for w in &s.window_ms { w.store(3, Ordering::Relaxed); }
                 } else if ev.id == id_w5 {
-                    s.window_ms.store(5, Ordering::Relaxed);
+                    for w in &s.window_ms { w.store(5, Ordering::Relaxed); }
                 } else if ev.id == id_w8 {
-                    s.window_ms.store(8, Ordering::Relaxed);
+                    for w in &s.window_ms { w.store(8, Ordering::Relaxed); }
                 } else if ev.id == id_quit {
                     std::process::exit(0);
                 }

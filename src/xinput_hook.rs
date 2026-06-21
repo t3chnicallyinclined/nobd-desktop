@@ -139,7 +139,7 @@ unsafe fn block_latch(
         return;
     }
 
-    let window = (crate::config::window_ms() as u64).min(MAX_BLOCK_MS);
+    let window = (crate::config::window_ms(p) as u64).min(MAX_BLOCK_MS);
     let start = Instant::now();
     let mut gap_us: Option<u64> = None;
 
@@ -276,7 +276,7 @@ fn continuous_poll_loop() {
 
             // Passive monitor while sync is OFF.
             if !crate::config::enabled() {
-                let window_us = (crate::config::window_ms() as u64) * 1000;
+                let window_us = (crate::config::window_ms(p) as u64) * 1000;
                 if let Some(lead) = shadow_lead[p] {
                     if now.saturating_sub(lead) > window_us {
                         shadow_lead[p] = None;

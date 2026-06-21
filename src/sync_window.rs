@@ -59,7 +59,7 @@ impl SyncWindow {
             return raw;
         }
 
-        let window = crate::config::window_ms();
+        let window = crate::config::window_ms(self.player);
 
         // Which bits are subject to the window. Firmware = all buttons; our
         // default = attacks only (directions bypass for zero motion-input lag).

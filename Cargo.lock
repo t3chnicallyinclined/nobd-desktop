@@ -1682,7 +1682,7 @@ dependencies = [
 
 [[package]]
 name = "nobd-app"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "eframe",
  "egui",
@@ -1695,7 +1695,7 @@ dependencies = [
 
 [[package]]
 name = "nobd-desktop"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "nobd-shared",
  "retour",
@@ -1704,7 +1704,7 @@ dependencies = [
 
 [[package]]
 name = "nobd-shared"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "windows-sys 0.52.0",
 ]

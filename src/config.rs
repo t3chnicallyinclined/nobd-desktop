@@ -6,8 +6,8 @@ use nobd_shared::{state, PlayerStats, NUM_PLAYERS};
 
 // ---- config (shared) ----
 #[inline] pub fn enabled() -> bool { state().enabled.load(Ordering::Relaxed) != 0 }
-#[inline] pub fn window_ms() -> u128 { state().window_ms.load(Ordering::Relaxed) as u128 }
-#[inline] pub fn window_ms_u32() -> u32 { state().window_ms.load(Ordering::Relaxed) }
+#[inline] pub fn window_ms(p: usize) -> u128 { state().window_ms[p.min(NUM_PLAYERS - 1)].load(Ordering::Relaxed) as u128 }
+#[inline] pub fn window_ms_u32(p: usize) -> u32 { state().window_ms[p.min(NUM_PLAYERS - 1)].load(Ordering::Relaxed) }
 #[inline] pub fn mode() -> u32 { state().mode.load(Ordering::Relaxed) }
 #[inline] pub fn directions_windowed() -> bool { state().directions_windowed.load(Ordering::Relaxed) != 0 }
 #[inline] pub fn settle_ms() -> u64 { state().settle_ms.load(Ordering::Relaxed) as u64 }
@@ -50,7 +50,7 @@ pub fn record_latency(p: usize, us: u64) {
         let label = match mode() { 1 => "BLOCK", 2 => "contin", _ => "defer" };
         crate::log::log(&format!(
             "P{} LATENCY[{label}] this={:.1}ms avg={avg:.1}ms max={max:.1}ms (n={n}, window={}ms)",
-            p + 1, us as f64 / 1000.0, window_ms_u32(),
+            p + 1, us as f64 / 1000.0, window_ms_u32(p),
         ));
     }
 }

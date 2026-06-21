@@ -12,7 +12,7 @@ use windows_sys::Win32::System::Memory::{
 
 // Bumped from the single-player layout ("NOBD") — the per-player stats array
 // changed the struct offsets, so a stale mapping from an older build is re-init'd.
-const MAGIC: u32 = 0x4E_42_44_32; // "NBD2"
+const MAGIC: u32 = 0x4E_42_44_33; // "NBD3" — window_ms became per-player
 
 /// Number of player slots with their own sync window + stats.
 pub const NUM_PLAYERS: usize = 2;
@@ -107,9 +107,9 @@ impl PlayerStats {
 pub struct SharedState {
     pub magic: AtomicU32,
 
-    // --- config (shared across players; either side writes) ---
-    pub enabled: AtomicU32,             // bool
-    pub window_ms: AtomicU32,
+    // --- config (either side writes) ---
+    pub enabled: AtomicU32,             // bool (shared)
+    pub window_ms: [AtomicU32; NUM_PLAYERS], // per-player sync window (ms)
     pub block_in_frame: AtomicU32,      // bool
     pub directions_windowed: AtomicU32, // bool
     pub settle_ms: AtomicU32,
@@ -126,7 +126,9 @@ pub struct SharedState {
 impl SharedState {
     fn init_defaults(&self) {
         self.enabled.store(1, Ordering::Relaxed);
-        self.window_ms.store(5, Ordering::Relaxed);
+        for w in &self.window_ms {
+            w.store(5, Ordering::Relaxed);
+        }
         self.block_in_frame.store(0, Ordering::Relaxed);
         self.directions_windowed.store(0, Ordering::Relaxed);
         self.settle_ms.store(1, Ordering::Relaxed);
