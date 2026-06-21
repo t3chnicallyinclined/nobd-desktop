@@ -15,11 +15,14 @@ const LOG_MAX: usize = 500;
 
 // Color for a recommended-window / finger-gap value (ms). The whole 0–16ms range
 // is legitimate (16ms = one frame, the original contract); the color tracks
-// latency cost + consistency, centered on the ~8ms average:
-//   ≤8 green (at/under average) · 9–12 orange (looser) · 13–16 red (near the frame)
+// latency + consistency over four tiers:
+//   ≤5 green (within debounce — essentially simultaneous) · 6–9 yellow (good,
+//   ~avg) · 10–12 orange (looser) · 13–16 red (near the frame ceiling)
 fn rec_color(ms: u32) -> Color32 {
-    if ms <= 8 {
+    if ms <= 5 {
         GREEN
+    } else if ms <= 9 {
+        YELLOW
     } else if ms <= 12 {
         ORANGE
     } else {
@@ -873,16 +876,23 @@ fn draw_gap_tester(
                     ui.add_space(6.0);
                     ui.colored_label(
                         GREEN,
-                        "\u{25CF} \u{2264}8 ms \u{2014} at or under the typical gap: tight timing, low latency.",
+                        "\u{25CF} \u{2264}5 ms \u{2014} excellent. Modern sticks debounce ~5ms, so presses \
+                         this close are essentially simultaneous at the hardware level \u{2014} as tight \
+                         as it gets.",
+                    );
+                    ui.colored_label(
+                        YELLOW,
+                        "\u{25CF} 6\u{2013}9 ms \u{2014} good. Around the typical ~8ms gap: solid \
+                         execution, low latency.",
                     );
                     ui.colored_label(
                         ORANGE,
-                        "\u{25CF} 9\u{2013}12 ms \u{2014} over half a frame: still legal, but the wider \
-                         window adds latency to a lone press and your timing's loosening.",
+                        "\u{25CF} 10\u{2013}12 ms \u{2014} loose: still legal, but the wider window adds \
+                         latency to a lone press and your timing's spreading.",
                     );
                     ui.colored_label(
                         RED,
-                        "\u{25CF} 13\u{2013}16 ms \u{2014} using most of the frame: max latency, and a \
+                        "\u{25CF} 13\u{2013}16 ms \u{2014} high: near the frame ceiling, max latency, and a \
                          spread this wide is unusual \u{2014} worth checking execution or the controller \
                          (switch chatter/lag, sticky button, low polling).",
                     );
