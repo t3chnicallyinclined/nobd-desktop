@@ -97,7 +97,8 @@ pub struct PollResult {
     pub pairs: Vec<ButtonPair>,
     pub strays: Vec<StrayPress>,
     pub bounces: Vec<BounceEvent>,
-    pub events: Vec<InputEvent>,
+    /// Raw press/release events, tagged with their controller index.
+    pub events: Vec<(usize, InputEvent)>,
 }
 
 pub struct GamepadInput {
@@ -213,7 +214,7 @@ impl GamepadInput {
                 }
                 InputMsg::Pressed(id, button, timestamp) => {
                     let c = self.index_of(id);
-                    result.events.push(InputEvent::Pressed(button));
+                    result.events.push((c, InputEvent::Pressed(button)));
                     let key = ButtonKey::from_button(button);
                     let pad = &mut self.pads[c];
 
@@ -259,7 +260,7 @@ impl GamepadInput {
                 }
                 InputMsg::Released(id, button, timestamp) => {
                     let c = self.index_of(id);
-                    result.events.push(InputEvent::Released(button));
+                    result.events.push((c, InputEvent::Released(button)));
                     let key = ButtonKey::from_button(button);
                     self.pads[c].last_release.insert(key, timestamp);
 

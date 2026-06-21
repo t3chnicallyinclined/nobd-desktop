@@ -34,7 +34,8 @@ impl ButtonState {
 }
 
 pub struct ButtonMonitor {
-    buttons: BTreeMap<ButtonKey, ButtonState>,
+    // keyed by (controller index, button)
+    buttons: BTreeMap<(usize, ButtonKey), ButtonState>,
     event_log: Vec<MonitorLogEntry>,
 }
 
@@ -55,6 +56,7 @@ impl Ord for ButtonKey {
 }
 
 pub struct MonitorLogEntry {
+    pub controller: usize,
     pub button_name: String,
     pub event_type: String,
     pub detail: String,
@@ -65,9 +67,7 @@ pub struct ButtonInfo {
     pub held: bool,
     pub press_count: u32,
     pub avg_hold_ms: f64,
-    pub last_hold_ms: f64,
     pub avg_repress_ms: f64,
-    pub last_repress_ms: f64,
 }
 
 impl ButtonMonitor {
@@ -78,8 +78,8 @@ impl ButtonMonitor {
         }
     }
 
-    pub fn on_press(&mut self, button: Button) {
-        let key = ButtonKey(button);
+    pub fn on_press(&mut self, controller: usize, button: Button) {
+        let key = (controller, ButtonKey(button));
         let state = self.buttons.entry(key).or_insert_with(ButtonState::new);
         let now = Instant::now();
 
@@ -103,6 +103,7 @@ impl ButtonMonitor {
         };
 
         self.event_log.push(MonitorLogEntry {
+            controller,
             button_name: format_button(button),
             event_type: "PRESS".to_string(),
             detail,
@@ -113,8 +114,8 @@ impl ButtonMonitor {
         }
     }
 
-    pub fn on_release(&mut self, button: Button) {
-        let key = ButtonKey(button);
+    pub fn on_release(&mut self, controller: usize, button: Button) {
+        let key = (controller, ButtonKey(button));
         let state = self.buttons.entry(key).or_insert_with(ButtonState::new);
         let now = Instant::now();
 
@@ -131,6 +132,7 @@ impl ButtonMonitor {
         state.release_time = Some(now);
 
         self.event_log.push(MonitorLogEntry {
+            controller,
             button_name: format_button(button),
             event_type: "RELEASE".to_string(),
             detail: hold_detail,
@@ -141,33 +143,29 @@ impl ButtonMonitor {
         }
     }
 
-    /// Get info for all buttons that have been pressed at least once.
-    pub fn button_infos(&self) -> Vec<ButtonInfo> {
+    /// Get info for one controller's buttons that have been pressed at least once.
+    pub fn button_infos(&self, controller: usize) -> Vec<ButtonInfo> {
         self.buttons
             .iter()
-            .map(|(key, state)| {
+            .filter(|((c, _), _)| *c == controller)
+            .map(|((_, key), state)| {
                 let avg_hold = if state.hold_durations.is_empty() {
                     0.0
                 } else {
                     state.hold_durations.iter().sum::<f64>() / state.hold_durations.len() as f64
                 };
-                let last_hold = state.hold_durations.last().copied().unwrap_or(0.0);
-
                 let avg_repress = if state.repress_gaps.is_empty() {
                     0.0
                 } else {
                     state.repress_gaps.iter().sum::<f64>() / state.repress_gaps.len() as f64
                 };
-                let last_repress = state.repress_gaps.last().copied().unwrap_or(0.0);
 
                 ButtonInfo {
                     name: format_button(key.0),
                     held: state.held,
                     press_count: state.press_count,
                     avg_hold_ms: avg_hold,
-                    last_hold_ms: last_hold,
                     avg_repress_ms: avg_repress,
-                    last_repress_ms: last_repress,
                 }
             })
             .collect()

@@ -1,6 +1,5 @@
 use eframe::egui;
 use egui::{Color32, RichText, ScrollArea, Ui};
-use egui_plot::{Bar, BarChart, Plot};
 
 use crate::input::{format_button, GamepadInput, InputEvent};
 use crate::monitor::ButtonMonitor;
@@ -322,10 +321,10 @@ impl eframe::App for FingerGapApp {
         // Poll gamepad — pairs/strays/bounces are tagged per controller now.
         let poll = self.input.as_mut().map(|i| i.poll());
         if let Some(result) = poll {
-            for ev in &result.events {
+            for (c, ev) in &result.events {
                 match ev {
-                    InputEvent::Pressed(btn) => self.monitor.on_press(*btn),
-                    InputEvent::Released(btn) => self.monitor.on_release(*btn),
+                    InputEvent::Pressed(btn) => self.monitor.on_press(*c, *btn),
+                    InputEvent::Released(btn) => self.monitor.on_release(*c, *btn),
                 }
             }
             for pair in result.pairs {
@@ -464,7 +463,7 @@ impl eframe::App for FingerGapApp {
         match self.active_tab {
             Tab::NobdSync => draw_nobd_sync(ctx, hook_live, dll_installed),
             Tab::GapTester => self.draw_gap_tester(ctx),
-            Tab::ButtonMonitor => draw_button_monitor(ctx, &self.monitor),
+            Tab::ButtonMonitor => self.draw_button_monitor(ctx),
             Tab::Install => self.draw_install(ctx),
         }
 
@@ -904,32 +903,6 @@ fn draw_gap_tester(&self, ctx: &egui::Context) {
             draw_stat(ui, "Pre-fire", &format!("{pf_count} ({pf_pct:.0}%)"));
         }
 
-        ui.add_space(8.0);
-        ui.label(RichText::new("Distribution").strong());
-        let buckets = stats.histogram_buckets();
-        if buckets.is_empty() {
-            ui.colored_label(Color32::DARK_GRAY, "No data yet");
-        } else {
-            let bars: Vec<Bar> = buckets.iter().enumerate()
-                .filter(|(_, (_, count, _))| *count > 0)
-                .map(|(i, (_label, count, _pct))| Bar::new(i as f64, *count as f64).width(0.7).fill(TEAL))
-                .collect();
-            let labels: Vec<(usize, String)> = buckets.iter().enumerate()
-                .map(|(i, (label, _, _))| (i, label.clone())).collect();
-            // Unique id per controller — duplicate Plot ids collide in egui.
-            Plot::new(format!("gap_hist_{cidx}"))
-                .height(150.0)
-                .allow_drag(false).allow_zoom(false).allow_scroll(false).allow_boxed_zoom(false)
-                .show_axes([true, true])
-                .x_axis_formatter(move |val, _range| {
-                    let idx = val.value.round() as usize;
-                    labels.iter().find(|(i, _)| *i == idx).map(|(_, l)| l.clone()).unwrap_or_default()
-                })
-                .y_axis_formatter(|val, _range| format!("{}", val.value as u32))
-                .show(ui, |plot_ui| {
-                    plot_ui.bar_chart(BarChart::new(format!("gaps_{cidx}"), bars));
-                });
-        }
         }
         });
         });
@@ -939,132 +912,106 @@ fn draw_gap_tester(&self, ctx: &egui::Context) {
 
 // ─── BUTTON MONITOR TAB ───
 
-fn draw_button_monitor(ctx: &egui::Context, monitor: &ButtonMonitor) {
+impl FingerGapApp {
+fn draw_button_monitor(&self, ctx: &egui::Context) {
+    let controllers = self
+        .input
+        .as_ref()
+        .map(|i| i.controllers())
+        .unwrap_or_default();
+
     egui::TopBottomPanel::bottom("monitor_log")
-        .min_height(150.0)
+        .min_height(140.0)
         .resizable(true)
         .show(ctx, |ui| {
-            ui.heading("Event Log");
+            ui.heading("Event Log (all controllers)");
             ui.separator();
-            ScrollArea::vertical()
-                .auto_shrink(false)
-                .show(ui, |ui| {
-                    for entry in monitor.event_log().iter().rev() {
-                        ui.horizontal(|ui| {
-                            let color = if entry.event_type == "PRESS" {
-                                GREEN
-                            } else {
-                                Color32::GRAY
-                            };
-                            ui.monospace(
-                                RichText::new(format!(
-                                    "{:<14} {:<8} {}",
-                                    entry.button_name, entry.event_type, entry.detail,
-                                ))
-                                .color(color),
-                            );
-                        });
-                    }
-                });
+            ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+                for entry in self.monitor.event_log().iter().rev() {
+                    ui.horizontal(|ui| {
+                        let color = if entry.event_type == "PRESS" { GREEN } else { Color32::GRAY };
+                        ui.monospace(
+                            RichText::new(format!(
+                                "[C{}] {:<14} {:<8} {}",
+                                entry.controller + 1, entry.button_name, entry.event_type, entry.detail,
+                            ))
+                            .color(color),
+                        );
+                    });
+                }
+            });
         });
 
     egui::CentralPanel::default().show(ctx, |ui| {
-        let infos = monitor.button_infos();
-
-        if infos.is_empty() {
+        if controllers.is_empty() {
             ui.add_space(40.0);
             ui.vertical_centered(|ui| {
                 ui.label(
-                    RichText::new("Press any button to start monitoring")
-                        .size(16.0)
-                        .color(Color32::GRAY),
+                    RichText::new("Connect a controller and press any button")
+                        .size(16.0).color(Color32::GRAY),
                 );
-                ui.add_space(4.0);
                 ui.label(
-                    RichText::new("Shows hold duration, repress timing, and activation stats")
-                        .size(13.0)
-                        .color(Color32::DARK_GRAY),
+                    RichText::new("Hold duration, repress timing & activation stats — per controller")
+                        .size(13.0).color(Color32::DARK_GRAY),
                 );
             });
             return;
         }
-
-        // Live button states
-        ui.add_space(8.0);
-        ui.heading("Active Buttons");
-        ui.add_space(4.0);
-        ui.horizontal_wrapped(|ui| {
-            for info in &infos {
-                let (color, text_color) = if info.held {
-                    (TEAL, Color32::BLACK)
-                } else {
-                    (Color32::from_rgb(40, 40, 50), Color32::GRAY)
-                };
-                egui::Frame::new()
-                    .inner_margin(egui::vec2(12.0, 6.0))
-                    .corner_radius(4.0)
-                    .fill(color)
-                    .show(ui, |ui| {
-                        ui.label(RichText::new(&info.name).strong().color(text_color));
-                    });
+        ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+        ui.columns(controllers.len(), |cols| {
+        for (ci, (cidx, cname)) in controllers.iter().enumerate() {
+            let ui = &mut cols[ci];
+            let infos = self.monitor.button_infos(*cidx);
+            ui.label(
+                RichText::new(format!("C{}: {cname}", cidx + 1))
+                    .strong().size(14.0)
+                    .color(if infos.is_empty() { Color32::GRAY } else { TEAL }),
+            );
+            ui.separator();
+            if infos.is_empty() {
+                ui.weak("Press any button…");
+                continue;
             }
-        });
 
-        ui.add_space(12.0);
-        ui.separator();
-        ui.add_space(8.0);
+            // Active buttons
+            ui.horizontal_wrapped(|ui| {
+                for info in &infos {
+                    let (color, tc) = if info.held {
+                        (TEAL, Color32::BLACK)
+                    } else {
+                        (Color32::from_rgb(40, 40, 50), Color32::GRAY)
+                    };
+                    egui::Frame::new()
+                        .inner_margin(egui::vec2(8.0, 4.0))
+                        .corner_radius(4.0)
+                        .fill(color)
+                        .show(ui, |ui| {
+                            ui.label(RichText::new(&info.name).strong().color(tc));
+                        });
+                }
+            });
+            ui.add_space(6.0);
 
-        // Per-button stats table
-        ui.heading("Button Stats");
-        ui.add_space(4.0);
-
-        egui::Grid::new("button_stats")
-            .striped(true)
-            .min_col_width(80.0)
-            .show(ui, |ui| {
-                // Header
-                ui.label(RichText::new("Button").strong().color(TEAL));
-                ui.label(RichText::new("Presses").strong().color(TEAL));
-                ui.label(RichText::new("Last Hold").strong().color(TEAL));
-                ui.label(RichText::new("Avg Hold").strong().color(TEAL));
-                ui.label(RichText::new("Last Repress").strong().color(TEAL));
-                ui.label(RichText::new("Avg Repress").strong().color(TEAL));
-                ui.label(RichText::new("State").strong().color(TEAL));
+            // Per-button stats (compact for the column).
+            egui::Grid::new(format!("bstats_{cidx}")).striped(true).min_col_width(48.0).show(ui, |ui| {
+                ui.label(RichText::new("Btn").strong().color(TEAL));
+                ui.label(RichText::new("#").strong().color(TEAL));
+                ui.label(RichText::new("Avg hold").strong().color(TEAL));
+                ui.label(RichText::new("Avg repress").strong().color(TEAL));
                 ui.end_row();
-
                 for info in &infos {
                     ui.label(&info.name);
                     ui.label(format!("{}", info.press_count));
-                    ui.label(if info.last_hold_ms > 0.0 {
-                        format!("{:.1}ms", info.last_hold_ms)
-                    } else {
-                        "-".to_string()
-                    });
-                    ui.label(if info.avg_hold_ms > 0.0 {
-                        format!("{:.1}ms", info.avg_hold_ms)
-                    } else {
-                        "-".to_string()
-                    });
-                    ui.label(if info.last_repress_ms > 0.0 {
-                        format!("{:.1}ms", info.last_repress_ms)
-                    } else {
-                        "-".to_string()
-                    });
-                    ui.label(if info.avg_repress_ms > 0.0 {
-                        format!("{:.1}ms", info.avg_repress_ms)
-                    } else {
-                        "-".to_string()
-                    });
-                    let (state_text, state_color) = if info.held {
-                        ("HELD", GREEN)
-                    } else {
-                        ("--", Color32::DARK_GRAY)
-                    };
-                    ui.label(RichText::new(state_text).color(state_color));
+                    ui.label(if info.avg_hold_ms > 0.0 { format!("{:.0}ms", info.avg_hold_ms) } else { "-".to_string() });
+                    ui.label(if info.avg_repress_ms > 0.0 { format!("{:.0}ms", info.avg_repress_ms) } else { "-".to_string() });
                     ui.end_row();
                 }
             });
+        }
+        });
+        });
     });
+}
 }
 
 fn draw_stat(ui: &mut Ui, label: &str, value: &str) {
