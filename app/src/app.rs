@@ -593,7 +593,10 @@ fn draw_nobd_sync(ctx: &egui::Context, hook_live: bool, dll_installed: bool) {
             ui.end_row();
             ui.label("Your finger gap:");
             if gap_max > 0.0 {
-                ui.label(format!("avg {gap_avg:.1} ms   max {gap_max:.1} ms"));
+                ui.colored_label(
+                    rec_color(gap_avg.round() as u32),
+                    format!("avg {gap_avg:.1} ms   max {gap_max:.1} ms"),
+                );
             } else {
                 ui.weak("— (do a few dashes / 2-button inputs)");
             }
