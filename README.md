@@ -1,8 +1,9 @@
 # NOBD Desktop
 
-**Fix the frame-boundary input problem in *Marvel vs. Capcom 2* (Fighting Collection, Steam) — in software, on modern hardware.**
+> ### NOBD keeps your inputs honest and your intent intact.
+> **Execution is back. No more fighting a broken pipeline between your hands and the game.**
 
-NOBD Desktop brings the [GP2040-CE NOBD](https://github.com/t3chnicallyinclined/GP2040-CE-NOBD) sync window to the PC version of MvC2. It groups near-simultaneous attack presses (LP+HP for a dash, an assist call alongside an action, etc.) so they land on the **same game frame** instead of getting split into a stray jab — without a NOBD stick.
+Frame-sync for the PC version of *Marvel vs. Capcom 2* (Fighting Collection, Steam). Your stick updates at 1000 Hz; the game reads at 60. NOBD groups your near-simultaneous attack presses so they land on the **same game frame** — your dash is a dash, not a stray jab — no NOBD stick required. It brings the [GP2040-CE NOBD](https://github.com/t3chnicallyinclined/GP2040-CE-NOBD) sync window to PC, in software.
 
 <!-- Hero shot: the NOBD Sync tab with the hook LIVE and stats flowing -->
 ![NOBD Desktop control panel](docs/images/control-panel.png)
@@ -18,6 +19,8 @@ Old arcade/console games like MvC2 read your controller **once per frame — 60 
 On modern hardware (and emulation) your controller updates far faster (1000 Hz+) than the game still reads (60 Hz). When you press two buttons a few ms apart — your natural **finger gap** — the game's single 60 Hz read can land **between** them and see only the first button. A dash becomes a stray jab, an assist drops, a tech is missed. Not because you mis-input — because the read sampled at the wrong instant.
 
 NOBD Desktop watches the game's input read: when it catches a lone attack, it checks whether the partner is arriving and delivers them together.
+
+**It's not your execution — it's the read. NOBD fixes the read.**
 
 ---
 
