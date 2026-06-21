@@ -5,6 +5,7 @@ mod app;
 mod input;
 mod install;
 mod monitor;
+mod persist;
 mod stats;
 mod tray;
 

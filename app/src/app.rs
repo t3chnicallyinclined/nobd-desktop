@@ -57,10 +57,13 @@ pub struct FingerGapApp {
     tray: Option<crate::tray::Tray>,
     game_path: String,
     install_msg: String,
+    last_cfg: crate::persist::Cfg,
 }
 
 impl FingerGapApp {
     pub fn new(ctx: &egui::Context) -> Self {
+        // Restore saved settings into shared memory before anything reads it.
+        let last_cfg = crate::persist::load();
         let (input, error_msg) = match GamepadInput::new() {
             Ok(gi) => (Some(gi), None),
             Err(e) => (None, Some(format!("Gamepad init failed: {e}"))),
@@ -80,6 +83,7 @@ impl FingerGapApp {
             tray: crate::tray::spawn(ctx.clone()),
             game_path,
             install_msg: String::new(),
+            last_cfg,
         }
     }
 }
@@ -361,6 +365,13 @@ impl eframe::App for FingerGapApp {
             Tab::Install => self.draw_install(ctx),
         }
 
+        // Persist settings whenever they change (from the panel or the tray).
+        let cfg = crate::persist::current();
+        if cfg != self.last_cfg {
+            crate::persist::save(&cfg);
+            self.last_cfg = cfg;
+        }
+
         // Repaint continuously so live DLL stats / gamepad input stay current.
         ctx.request_repaint_after(std::time::Duration::from_millis(50));
     }
@@ -450,6 +461,12 @@ fn draw_nobd_sync(ctx: &egui::Context, hook_live: bool, dll_installed: bool) {
         if ui.add(egui::Slider::new(&mut win, 1..=16).suffix(" ms")).changed() {
             s.window_ms.store(win, Ordering::Relaxed);
         }
+        ui.weak(
+            "Capped at 16 ms = one frame — the game's original \"same-frame\" window. A larger \
+             window would group presses the game itself would have split across frames (an unfair \
+             reach), so 16 ms is the honest maximum. Bigger is more forgiving (helps loose \
+             execution) but adds latency to a lone press; set it from the Finger Gap Tester.",
+        );
 
         // Settle is a Block-only knob (3-button straggler wait); no effect in
         // Continuous, so it's hidden. Uncomment if Block is re-exposed.

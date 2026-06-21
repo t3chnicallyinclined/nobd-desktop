@@ -79,13 +79,14 @@ impl GapStats {
         result
     }
 
-    /// Recommended NOBD slider value: max(3, ceil(average) + 1)
+    /// Recommended NOBD slider value: ceil(average) + 1, clamped to 3..=16 ms
+    /// (16 ms = one frame, the honest maximum).
     pub fn recommended_nobd(&self) -> u32 {
         if self.gaps.is_empty() {
             return 0;
         }
         let avg = self.average();
-        3u32.max(avg.ceil() as u32 + 1)
+        (avg.ceil() as u32 + 1).clamp(3, 16)
     }
 
     /// Percentage of gaps that are effectively zero (< 0.1ms).

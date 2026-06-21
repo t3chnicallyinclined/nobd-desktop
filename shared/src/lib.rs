@@ -131,11 +131,12 @@ impl SharedState {
         (avg, self.gap_max_us.load(Ordering::Relaxed) as f64 / 1000.0)
     }
 
-    /// Smallest window that still catches your dashes: ceil(max gap)+1, floor 3ms.
+    /// Smallest window that still catches your dashes: ceil(max gap)+1, clamped
+    /// to 3..=16 ms (16 ms = one frame, the honest maximum).
     pub fn recommended_window_ms(&self) -> u32 {
         let (_avg, max) = self.finger_gap_ms();
         if max <= 0.0 { return 0; }
-        (max.ceil() as u32 + 1).max(3)
+        (max.ceil() as u32 + 1).clamp(3, 16)
     }
 }
 
