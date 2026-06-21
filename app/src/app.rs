@@ -13,13 +13,14 @@ const RED: Color32 = Color32::from_rgb(220, 60, 60);
 const ORANGE: Color32 = Color32::from_rgb(220, 140, 40);
 const LOG_MAX: usize = 500;
 
-// Color for a recommended-window / finger-gap value (ms): a tight gap is healthy,
-// a wide one points at execution or hardware problems.
-//   ≤5 green · 6–10 orange · 11–16 red
+// Color for a recommended-window / finger-gap value (ms). The whole 0–16ms range
+// is legitimate (16ms = one frame, the original contract); the color tracks
+// latency cost + consistency, centered on the ~8ms average:
+//   ≤8 green (at/under average) · 9–12 orange (looser) · 13–16 red (near the frame)
 fn rec_color(ms: u32) -> Color32 {
-    if ms <= 5 {
+    if ms <= 8 {
         GREEN
-    } else if ms <= 10 {
+    } else if ms <= 12 {
         ORANGE
     } else {
         RED
@@ -861,25 +862,29 @@ fn draw_gap_tester(
                     );
                     ui.add_space(4.0);
                     ui.label(
-                        "Clean execution sits low \u{2014} a few ms. In MvC2 you have ~one frame \
-                         (16.67ms) for both buttons to land on the same read, and a well-formed \
-                         two-button intent usually comes together in under ~8ms. As your gap climbs \
-                         past that, the window is no longer just covering normal timing \u{2014} it's \
-                         compensating for something.",
+                        "The game reads once per frame, so any two presses within ~16ms (one frame) \
+                         would have landed together on the original hardware \u{2014} all of that range \
+                         is legitimate. ~8ms is the typical gap. So these colors aren't about fairness \
+                         (anything \u{2264}16ms is fair); they track latency and consistency: a smaller \
+                         gap means a tighter, lower-latency window, a wider one holds a lone press \
+                         longer and means looser timing \u{2014} and a consistently wide gap can hint at \
+                         a button/hardware issue.",
                     );
                     ui.add_space(6.0);
-                    ui.colored_label(GREEN, "\u{25CF} \u{2264}5 ms \u{2014} tight, clean execution.");
+                    ui.colored_label(
+                        GREEN,
+                        "\u{25CF} \u{2264}8 ms \u{2014} at or under the typical gap: tight timing, low latency.",
+                    );
                     ui.colored_label(
                         ORANGE,
-                        "\u{25CF} 6\u{2013}10 ms \u{2014} getting loose; you're around/over the ~8ms \
-                         intent window. Watch your timing.",
+                        "\u{25CF} 9\u{2013}12 ms \u{2014} over half a frame: still legal, but the wider \
+                         window adds latency to a lone press and your timing's loosening.",
                     );
                     ui.colored_label(
                         RED,
-                        "\u{25CF} 11\u{2013}16 ms \u{2014} well beyond normal. Likely an execution habit \
-                         (pressing too far apart) OR a button/hardware issue: switch chatter or lag, a \
-                         sticky button, or low controller polling. Check those before leaning on a wide \
-                         window.",
+                        "\u{25CF} 13\u{2013}16 ms \u{2014} using most of the frame: max latency, and a \
+                         spread this wide is unusual \u{2014} worth checking execution or the controller \
+                         (switch chatter/lag, sticky button, low polling).",
                     );
                 });
                 ui.add_space(8.0);
