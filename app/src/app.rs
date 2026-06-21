@@ -857,53 +857,6 @@ fn draw_gap_tester(&self, ctx: &egui::Context) {
                         });
                     });
                 ui.add_space(6.0);
-
-                // What the gap means + the ~8ms execution threshold.
-                egui::CollapsingHeader::new(
-                    RichText::new("\u{24D8}  What your finger gap means").color(TEAL),
-                )
-                .default_open(false)
-                .show(ui, |ui| {
-                    ui.label(
-                        "Your \u{201C}finger gap\u{201D} is the real time between the two buttons when \
-                         you press them together (e.g. LP+HP for a dash). The recommended window is \
-                         that gap plus a little headroom.",
-                    );
-                    ui.add_space(4.0);
-                    ui.label(
-                        "The game reads once per frame, so any two presses within ~16ms (one frame) \
-                         would have landed together on the original hardware \u{2014} all of that range \
-                         is legitimate. ~8ms is the typical gap. So these colors aren't about fairness \
-                         (anything \u{2264}16ms is fair); they track latency and consistency: a smaller \
-                         gap means a tighter, lower-latency window, a wider one holds a lone press \
-                         longer and means looser timing \u{2014} and a consistently wide gap can hint at \
-                         a button/hardware issue.",
-                    );
-                    ui.add_space(6.0);
-                    ui.colored_label(
-                        GREEN,
-                        "\u{25CF} \u{2264}5 ms \u{2014} excellent. Modern sticks debounce ~5ms, so presses \
-                         this close are essentially simultaneous at the hardware level \u{2014} as tight \
-                         as it gets.",
-                    );
-                    ui.colored_label(
-                        YELLOW,
-                        "\u{25CF} 6\u{2013}9 ms \u{2014} good. Around the typical ~8ms gap: solid \
-                         execution, low latency.",
-                    );
-                    ui.colored_label(
-                        ORANGE,
-                        "\u{25CF} 10\u{2013}12 ms \u{2014} loose: still legal, but the wider window adds \
-                         latency to a lone press and your timing's spreading.",
-                    );
-                    ui.colored_label(
-                        RED,
-                        "\u{25CF} 13\u{2013}16 ms \u{2014} high: near the frame ceiling, max latency, and a \
-                         spread this wide is unusual \u{2014} worth checking execution or the controller \
-                         (switch chatter/lag, sticky button, low polling).",
-                    );
-                });
-                ui.add_space(8.0);
             }
         } else {
             ui.add_space(20.0);
@@ -925,127 +878,58 @@ fn draw_gap_tester(&self, ctx: &egui::Context) {
 
         ui.separator();
 
-        let available = ui.available_size();
-        ui.horizontal_top(|ui| {
-            // Left: Live stats
-            ui.vertical(|ui| {
-                ui.set_min_width(180.0);
-                ui.heading("Live Stats");
-                ui.add_space(8.0);
+        // Live stats (stacked, full column width — avoids text squish in a column).
+        draw_stat(ui, "Pairs", &format!("{}", stats.count()));
+        if stats.count() > 0 {
+            draw_stat(ui, "Average", &format!("{:.1}ms", stats.average()));
+            draw_stat(ui, "Median", &format!("{:.1}ms", stats.median()));
+            draw_stat(ui, "Fastest", &format!("{:.1}ms", stats.min()));
+            draw_stat(ui, "Slowest", &format!("{:.1}ms", stats.max()));
+        }
+        let total_sequences = stats.count() + stray_count;
+        let stray_pct = if total_sequences > 0 {
+            stray_count as f64 / total_sequences as f64 * 100.0
+        } else { 0.0 };
+        draw_stat_colored(ui, "Strays", &format!("{stray_count}"),
+            if stray_count > 0 { RED } else { Color32::WHITE });
+        if total_sequences > 0 {
+            draw_stat_colored(ui, "Stray rate", &format!("{stray_pct:.1}%"),
+                if stray_pct > 10.0 { RED } else if stray_pct > 0.0 { YELLOW } else { GREEN });
+        }
+        draw_stat_colored(ui, "Bounces", &format!("{bounce_count}"),
+            if bounce_count > 0 { ORANGE } else { Color32::WHITE });
+        if stats.count() > 0 {
+            let pf_count = stats.pre_fire_count();
+            let pf_pct = pf_count as f64 / stats.count() as f64 * 100.0;
+            draw_stat(ui, "Pre-fire", &format!("{pf_count} ({pf_pct:.0}%)"));
+        }
 
-                // Pair stats
-                draw_stat(ui, "Pairs", &format!("{}", stats.count()));
-                if stats.count() > 0 {
-                    draw_stat(ui, "Average", &format!("{:.1}ms", stats.average()));
-                    draw_stat(ui, "Median", &format!("{:.1}ms", stats.median()));
-                    draw_stat(ui, "Fastest", &format!("{:.1}ms", stats.min()));
-                    draw_stat(ui, "Slowest", &format!("{:.1}ms", stats.max()));
-                }
-
-                ui.add_space(12.0);
-                ui.separator();
-                ui.add_space(4.0);
-
-                // Stray stats
-                let total_sequences = stats.count() + stray_count;
-                let stray_pct = if total_sequences > 0 {
-                    stray_count as f64 / total_sequences as f64 * 100.0
-                } else {
-                    0.0
-                };
-                draw_stat_colored(
-                    ui,
-                    "Strays",
-                    &format!("{}", stray_count),
-                    if stray_count > 0 { RED } else { Color32::WHITE },
-                );
-                if total_sequences > 0 {
-                    draw_stat_colored(
-                        ui,
-                        "Stray Rate",
-                        &format!("{:.1}%", stray_pct),
-                        if stray_pct > 10.0 {
-                            RED
-                        } else if stray_pct > 0.0 {
-                            YELLOW
-                        } else {
-                            GREEN
-                        },
-                    );
-                }
-
-                // Bounce count
-                draw_stat_colored(
-                    ui,
-                    "Bounces",
-                    &format!("{}", bounce_count),
-                    if bounce_count > 0 { ORANGE } else { Color32::WHITE },
-                );
-
-                // Pre-fire count
-                if stats.count() > 0 {
-                    let pf_count = stats.pre_fire_count();
-                    let pf_pct = pf_count as f64 / stats.count() as f64 * 100.0;
-                    draw_stat(
-                        ui,
-                        "Pre-fire",
-                        &format!("{} ({:.0}%)", pf_count, pf_pct),
-                    );
-                }
-            });
-
-            ui.separator();
-
-            // Right: Histogram
-            ui.vertical(|ui| {
-                ui.heading("Distribution");
-                ui.add_space(4.0);
-
-                let buckets = stats.histogram_buckets();
-                if buckets.is_empty() {
-                    ui.colored_label(Color32::DARK_GRAY, "No data yet");
-                } else {
-                    let bars: Vec<Bar> = buckets
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, (_, count, _))| *count > 0)
-                        .map(|(i, (_label, count, _pct))| {
-                            Bar::new(i as f64, *count as f64)
-                                .width(0.7)
-                                .fill(TEAL)
-                        })
-                        .collect();
-
-                    let labels: Vec<(usize, String)> = buckets
-                        .iter()
-                        .enumerate()
-                        .map(|(i, (label, _, _))| (i, label.clone()))
-                        .collect();
-
-                    let chart_height = (available.y * 0.45).max(120.0).min(250.0);
-
-                    Plot::new("gap_histogram")
-                        .height(chart_height)
-                        .allow_drag(false)
-                        .allow_zoom(false)
-                        .allow_scroll(false)
-                        .allow_boxed_zoom(false)
-                        .show_axes([true, true])
-                        .x_axis_formatter(move |val, _range| {
-                            let idx = val.value.round() as usize;
-                            labels
-                                .iter()
-                                .find(|(i, _)| *i == idx)
-                                .map(|(_, l)| l.clone())
-                                .unwrap_or_default()
-                        })
-                        .y_axis_formatter(|val, _range| format!("{}", val.value as u32))
-                        .show(ui, |plot_ui| {
-                            plot_ui.bar_chart(BarChart::new("gaps".to_string(), bars));
-                        });
-                }
-            });
-        });
+        ui.add_space(8.0);
+        ui.label(RichText::new("Distribution").strong());
+        let buckets = stats.histogram_buckets();
+        if buckets.is_empty() {
+            ui.colored_label(Color32::DARK_GRAY, "No data yet");
+        } else {
+            let bars: Vec<Bar> = buckets.iter().enumerate()
+                .filter(|(_, (_, count, _))| *count > 0)
+                .map(|(i, (_label, count, _pct))| Bar::new(i as f64, *count as f64).width(0.7).fill(TEAL))
+                .collect();
+            let labels: Vec<(usize, String)> = buckets.iter().enumerate()
+                .map(|(i, (label, _, _))| (i, label.clone())).collect();
+            // Unique id per controller — duplicate Plot ids collide in egui.
+            Plot::new(format!("gap_hist_{cidx}"))
+                .height(150.0)
+                .allow_drag(false).allow_zoom(false).allow_scroll(false).allow_boxed_zoom(false)
+                .show_axes([true, true])
+                .x_axis_formatter(move |val, _range| {
+                    let idx = val.value.round() as usize;
+                    labels.iter().find(|(i, _)| *i == idx).map(|(_, l)| l.clone()).unwrap_or_default()
+                })
+                .y_axis_formatter(|val, _range| format!("{}", val.value as u32))
+                .show(ui, |plot_ui| {
+                    plot_ui.bar_chart(BarChart::new(format!("gaps_{cidx}"), bars));
+                });
+        }
         }
         });
         });
