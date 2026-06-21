@@ -103,8 +103,4 @@ impl GapStats {
     pub fn pre_fire_count(&self) -> usize {
         self.gaps.iter().filter(|&&g| g >= 1.0).count()
     }
-
-    pub fn clear(&mut self) {
-        self.gaps.clear();
-    }
 }

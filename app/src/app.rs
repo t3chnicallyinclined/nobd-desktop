@@ -30,11 +30,87 @@ fn rec_color(ms: u32) -> Color32 {
     }
 }
 
+/// One player's live in-game stats, drawn into a column.
+fn draw_player_live(
+    ui: &mut Ui,
+    ps: &nobd_shared::PlayerStats,
+    p: usize,
+    enabled: bool,
+    s: &nobd_shared::SharedState,
+) {
+    use std::sync::atomic::Ordering;
+    let groups = ps.groups.load(Ordering::Relaxed);
+    let singles = ps.singles.load(Ordering::Relaxed);
+    let saves = ps.saves.load(Ordering::Relaxed);
+    let misses = ps.misses.load(Ordering::Relaxed);
+    let (gap_avg, gap_max) = ps.finger_gap_ms();
+    let rec = ps.recommended_window_ms();
+    let frame_us = ps.frame_us.load(Ordering::Relaxed);
+    let (gp_avg, gp_max) = ps.game_perceived_ms();
+    let waits = ps.frame_waits.load(Ordering::Relaxed);
+    let dels = ps.gp_lat_count.load(Ordering::Relaxed);
+
+    let head = if ps.active() { TEAL } else { Color32::GRAY };
+    ui.label(RichText::new(format!("Player {}", p + 1)).strong().size(15.0).color(head));
+
+    if enabled {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(format!("{saves}")).size(26.0).strong().color(GREEN));
+            ui.label("splits caught");
+        });
+    } else {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(format!("{misses}")).size(26.0).strong().color(RED));
+            ui.label(RichText::new("splits MISSED").color(RED));
+        });
+    }
+
+    egui::Grid::new(format!("pstats_{p}")).num_columns(2).spacing([10.0, 3.0]).show(ui, |ui| {
+        ui.label("Grouped / singles:");
+        ui.label(format!("{groups} / {singles}"));
+        ui.end_row();
+        ui.label("Input latency:");
+        if gp_max > 0.0 {
+            ui.colored_label(
+                if gp_avg < 8.0 { GREEN } else if gp_avg < 16.0 { YELLOW } else { ORANGE },
+                format!("{gp_avg:.1} / {gp_max:.1} ms"),
+            );
+        } else { ui.weak("—"); }
+        ui.end_row();
+        ui.label("Waited a frame:");
+        if dels > 0 {
+            let pct = waits as f64 / dels as f64 * 100.0;
+            ui.colored_label(
+                if pct < 35.0 { GREEN } else if pct < 60.0 { YELLOW } else { ORANGE },
+                format!("{waits}/{dels} ({pct:.0}%)"),
+            );
+        } else { ui.weak("—"); }
+        ui.end_row();
+        ui.label("Finger gap:");
+        if gap_max > 0.0 {
+            ui.colored_label(rec_color(gap_avg.round() as u32), format!("{gap_avg:.1} / {gap_max:.1} ms"));
+        } else { ui.weak("—"); }
+        ui.end_row();
+        ui.label("Frame time:");
+        if frame_us > 0 {
+            ui.label(format!("{:.2} ms", frame_us as f64 / 1000.0));
+        } else { ui.weak("—"); }
+        ui.end_row();
+    });
+
+    if rec > 0 {
+        ui.horizontal(|ui| {
+            ui.label("Rec window:");
+            ui.colored_label(rec_color(rec), RichText::new(format!("{rec} ms")).strong());
+            if ui.small_button("Apply").clicked() {
+                s.window_ms.store(rec, Ordering::Relaxed);
+            }
+        });
+    }
+}
+
 // Last DLL heartbeat we saw, to detect whether the in-game hook is actively polling.
 static LAST_HB: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-// Which player's live stats the NOBD Sync tab is showing (0 = P1, 1 = P2).
-static STATS_PLAYER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 #[derive(PartialEq, Clone, Copy)]
 enum Tab {
@@ -74,7 +150,6 @@ pub struct FingerGapApp {
     stats: Vec<GapStats>,
     stray_counts: Vec<usize>,
     bounce_counts: Vec<usize>,
-    gap_sel: usize, // which controller the Gap Tester tab is viewing
     gap_log: Vec<GapLogEntry>,
     monitor: ButtonMonitor,
     active_tab: Tab,
@@ -101,7 +176,6 @@ impl FingerGapApp {
             stats: Vec::new(),
             stray_counts: Vec::new(),
             bounce_counts: Vec::new(),
-            gap_sel: 0,
             gap_log: Vec::new(),
             monitor: ButtonMonitor::new(),
             active_tab: Tab::NobdSync,
@@ -442,7 +516,6 @@ fn draw_nobd_sync(ctx: &egui::Context, hook_live: bool, dll_installed: bool) {
         ui.label(RichText::new("Latch mode").strong());
         s.mode.store(2, Ordering::Relaxed); // force Continuous
         s.block_in_frame.store(0, Ordering::Relaxed);
-        let mode = s.mode.load(Ordering::Relaxed);
         ui.colored_label(
             TEAL,
             "\u{25C9} Continuous: a ~1kHz background thread runs the sync window on its own clock and \
@@ -512,63 +585,24 @@ fn draw_nobd_sync(ctx: &egui::Context, hook_live: bool, dll_installed: bool) {
         ui.add_space(10.0);
         ui.separator();
 
-        // ── Live stats from the in-game hook (per player) ──
-        let sel = STATS_PLAYER.load(Ordering::Relaxed).min(nobd_shared::NUM_PLAYERS - 1);
+        // ── Live in-game stats — both players side by side ──
         ui.horizontal(|ui| {
             ui.label(RichText::new("Live in-game stats").strong().size(16.0));
-            ui.add_space(8.0);
-            for pl in 0..nobd_shared::NUM_PLAYERS {
-                let act = s.players[pl].active();
-                let txt = if act { format!("P{} \u{25CF}", pl + 1) } else { format!("P{}", pl + 1) };
-                if ui.selectable_label(sel == pl, txt).clicked() {
-                    STATS_PLAYER.store(pl, Ordering::Relaxed);
-                }
+            ui.add_space(10.0);
+            ui.label("Poll rate:");
+            let poll_hz = s.poll_hz.load(Ordering::Relaxed);
+            if poll_hz > 0 {
+                ui.colored_label(if poll_hz >= 500 { GREEN } else { ORANGE }, format!("{poll_hz} Hz"));
+            } else {
+                ui.weak("—");
             }
         });
-        let ps = &s.players[sel];
-        let groups = ps.groups.load(Ordering::Relaxed);
-        let singles = ps.singles.load(Ordering::Relaxed);
-        let saves = ps.saves.load(Ordering::Relaxed);
-        let (lat_avg, lat_max) = ps.latency_ms();
-        let (gap_avg, gap_max) = ps.finger_gap_ms();
-        let rec = ps.recommended_window_ms();
-        let frame_us = ps.frame_us.load(Ordering::Relaxed);
-        let poll_hz = s.poll_hz.load(Ordering::Relaxed);
-        let (gp_avg, gp_max) = ps.game_perceived_ms();
-
-        // Headline: when sync is ON, frame-boundary splits we CAUGHT (saves).
-        // When OFF, the passive monitor shows the splits that ACTUALLY occurred.
-        let attempts = ps.attempts.load(Ordering::Relaxed);
-        let misses = ps.misses.load(Ordering::Relaxed);
-        if enabled {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(format!("{saves}")).size(34.0).strong().color(GREEN));
-                ui.vertical(|ui| {
-                    ui.label(RichText::new("frame-boundary splits caught").size(15.0));
-                    // saves ⊆ groups (a save is a group that crossed a frame).
-                    let rate = if groups > 0 {
-                        saves as f64 / groups as f64 * 100.0
-                    } else { 0.0 };
-                    ui.weak(format!(
-                        "{rate:.0}% of grouped inputs would have split across a frame without NOBD"
-                    ));
-                });
-            });
-        } else {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(format!("{misses}")).size(34.0).strong().color(RED));
-                ui.vertical(|ui| {
-                    ui.label(RichText::new("frame-boundary splits MISSED \u{2014} sync is OFF")
-                        .size(15.0).color(RED));
-                    let rate = if attempts > 0 {
-                        misses as f64 / attempts as f64 * 100.0
-                    } else { 0.0 };
-                    ui.weak(format!(
-                        "{rate:.0}% of {attempts} gapped multi-button inputs split across a frame \u{2014} turn sync ON to fix"
-                    ));
-                });
-            });
-        }
+        ui.add_space(4.0);
+        ui.columns(nobd_shared::NUM_PLAYERS, |cols| {
+            for p in 0..nobd_shared::NUM_PLAYERS {
+                draw_player_live(&mut cols[p], &s.players[p], p, enabled, s);
+            }
+        });
 
         egui::CollapsingHeader::new(RichText::new("\u{24D8}  What is the frame-boundary issue?").color(TEAL))
             .default_open(false)
@@ -602,95 +636,6 @@ fn draw_nobd_sync(ctx: &egui::Context, hook_live: bool, dll_installed: bool) {
             });
         ui.add_space(6.0);
 
-        egui::Grid::new("nobd_stats").num_columns(2).spacing([24.0, 4.0]).show(ui, |ui| {
-            ui.label("Grouped (2+ buttons):");
-            ui.colored_label(TEAL, format!("{groups}"));
-            ui.end_row();
-            ui.label("Singles (solo press):");
-            ui.label(format!("{singles}"));
-            ui.end_row();
-            ui.label("Grouping hold (lead wait):");
-            ui.colored_label(
-                if lat_avg < 2.0 { GREEN } else if lat_avg < 5.0 { YELLOW } else { ORANGE },
-                format!("avg {lat_avg:.1} ms   max {lat_max:.1} ms"),
-            );
-            ui.end_row();
-            ui.label("Your finger gap:");
-            if gap_max > 0.0 {
-                ui.colored_label(
-                    rec_color(gap_avg.round() as u32),
-                    format!("avg {gap_avg:.1} ms   max {gap_max:.1} ms"),
-                );
-            } else {
-                ui.weak("— (do a few dashes / 2-button inputs)");
-            }
-            ui.end_row();
-            ui.label("Game frame time:");
-            if frame_us > 0 {
-                let fps = 1_000_000.0 / frame_us as f64;
-                let ms = frame_us as f64 / 1000.0;
-                ui.colored_label(
-                    if ms <= 17.5 { GREEN } else { ORANGE },
-                    format!("{ms:.2} ms  ({fps:.0} fps)"),
-                );
-            } else {
-                ui.weak("—");
-            }
-            ui.end_row();
-
-            // Continuous-mode health + the headline latency number.
-            if mode == 2 {
-                ui.label("Poll rate:");
-                if poll_hz > 0 {
-                    ui.colored_label(
-                        if poll_hz >= 500 { GREEN } else { ORANGE },
-                        format!("{poll_hz} Hz"),
-                    );
-                } else {
-                    ui.weak("— (start the game / press a button)");
-                }
-                ui.end_row();
-
-                ui.label("Input latency (press\u{2192}game):");
-                if gp_max > 0.0 {
-                    ui.colored_label(
-                        if gp_avg < 8.0 { GREEN } else if gp_avg < 16.0 { YELLOW } else { ORANGE },
-                        format!("avg {gp_avg:.1} ms   max {gp_max:.1} ms"),
-                    );
-                } else {
-                    ui.weak("— (press an attack)");
-                }
-                ui.end_row();
-
-                ui.label("Waited a frame:");
-                let waits = ps.frame_waits.load(Ordering::Relaxed);
-                let dels = ps.gp_lat_count.load(Ordering::Relaxed);
-                if dels > 0 {
-                    let pct = waits as f64 / dels as f64 * 100.0;
-                    ui.colored_label(
-                        if pct < 35.0 { GREEN } else if pct < 60.0 { YELLOW } else { ORANGE },
-                        format!("{waits} of {dels}  ({pct:.0}%)"),
-                    );
-                } else {
-                    ui.weak("—");
-                }
-                ui.end_row();
-            }
-        });
-
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            if rec > 0 {
-                ui.label("Recommended window:");
-                ui.colored_label(rec_color(rec), RichText::new(format!("{rec} ms")).strong());
-                if ui.button(format!("Apply {rec} ms")).clicked() {
-                    s.window_ms.store(rec, Ordering::Relaxed);
-                }
-            } else {
-                ui.weak("Recommended window appears after measuring your finger gap.");
-            }
-        });
-
         ui.add_space(6.0);
         if ui.button("Reset stats").clicked() {
             s.reset_stats();
@@ -712,19 +657,12 @@ fn draw_nobd_sync(ctx: &egui::Context, hook_live: bool, dll_installed: bool) {
 // ─── GAP TESTER TAB ───
 
 impl FingerGapApp {
-fn draw_gap_tester(&mut self, ctx: &egui::Context) {
+fn draw_gap_tester(&self, ctx: &egui::Context) {
     let controllers = self
         .input
         .as_ref()
         .map(|i| i.controllers())
         .unwrap_or_default();
-    let sel = self.gap_sel.min(self.stats.len().saturating_sub(1).max(0));
-    let mut clicked_sel: Option<usize> = None;
-
-    let empty = GapStats::new();
-    let stats: &GapStats = self.stats.get(sel).unwrap_or(&empty);
-    let stray_count = self.stray_counts.get(sel).copied().unwrap_or(0);
-    let bounce_count = self.bounce_counts.get(sel).copied().unwrap_or(0);
     let log = &self.gap_log;
 
     egui::TopBottomPanel::bottom("gap_log")
@@ -824,26 +762,35 @@ fn draw_gap_tester(&mut self, ctx: &egui::Context) {
         });
 
     egui::CentralPanel::default().show(ctx, |ui| {
-        // Controller selector — each pad is paired/measured independently.
-        if controllers.len() > 1 {
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Controller:").strong());
-                for (i, name) in &controllers {
-                    if ui
-                        .selectable_label(sel == *i, format!("C{}", i + 1))
-                        .on_hover_text(name)
-                        .clicked()
-                    {
-                        clicked_sel = Some(*i);
-                    }
-                }
-                if let Some((_, name)) = controllers.iter().find(|(i, _)| *i == sel) {
-                    ui.weak(format!("— testing {name}"));
-                }
+        if controllers.is_empty() {
+            ui.add_space(20.0);
+            ui.vertical_centered(|ui| {
+                ui.label(
+                    RichText::new("Connect a controller and press two buttons together")
+                        .size(16.0).color(Color32::GRAY),
+                );
+                ui.label(
+                    RichText::new("(like LP+HP for a dash) — each controller is measured separately")
+                        .size(13.0).color(Color32::DARK_GRAY),
+                );
             });
-            ui.separator();
+            return;
         }
+        // One column per connected controller — all visible at once.
+        ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+        ui.columns(controllers.len(), |cols| {
+        for (ci, (cidx, cname)) in controllers.iter().enumerate() {
+        let ui = &mut cols[ci];
+        let empty = GapStats::new();
+        let stats: &GapStats = self.stats.get(*cidx).unwrap_or(&empty);
+        let stray_count = self.stray_counts.get(*cidx).copied().unwrap_or(0);
+        let bounce_count = self.bounce_counts.get(*cidx).copied().unwrap_or(0);
+        ui.label(
+            RichText::new(format!("C{}: {cname}", cidx + 1))
+                .strong().size(14.0)
+                .color(if stats.count() > 0 { TEAL } else { Color32::GRAY }),
+        );
+        ui.separator();
 
         if stats.count() > 0 || stray_count > 0 {
             ui.add_space(8.0);
@@ -1099,11 +1046,10 @@ fn draw_gap_tester(&mut self, ctx: &egui::Context) {
                 }
             });
         });
+        }
+        });
+        });
     });
-
-    if let Some(ns) = clicked_sel {
-        self.gap_sel = ns;
-    }
 }
 }
 
