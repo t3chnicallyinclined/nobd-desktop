@@ -13,6 +13,19 @@ const RED: Color32 = Color32::from_rgb(220, 60, 60);
 const ORANGE: Color32 = Color32::from_rgb(220, 140, 40);
 const LOG_MAX: usize = 500;
 
+// Color for a recommended-window / finger-gap value (ms): a tight gap is healthy,
+// a wide one points at execution or hardware problems.
+//   ≤5 green · 6–10 orange · 11–16 red
+fn rec_color(ms: u32) -> Color32 {
+    if ms <= 5 {
+        GREEN
+    } else if ms <= 10 {
+        ORANGE
+    } else {
+        RED
+    }
+}
+
 // Last DLL heartbeat we saw, to detect whether the in-game hook is actively polling.
 static LAST_HB: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
@@ -638,7 +651,7 @@ fn draw_nobd_sync(ctx: &egui::Context, hook_live: bool, dll_installed: bool) {
         ui.horizontal(|ui| {
             if rec > 0 {
                 ui.label("Recommended window:");
-                ui.colored_label(TEAL, RichText::new(format!("{rec} ms")).strong());
+                ui.colored_label(rec_color(rec), RichText::new(format!("{rec} ms")).strong());
                 if ui.button(format!("Apply {rec} ms")).clicked() {
                     s.window_ms.store(rec, Ordering::Relaxed);
                 }
@@ -807,10 +820,12 @@ fn draw_gap_tester(
             }
 
             if stats.count() > 0 {
+                let rec = stats.recommended_nobd();
+                let col = rec_color(rec);
                 egui::Frame::new()
                     .inner_margin(12.0)
                     .corner_radius(8.0)
-                    .stroke(egui::Stroke::new(2.0, TEAL))
+                    .stroke(egui::Stroke::new(2.0, col))
                     .show(ui, |ui| {
                         ui.vertical_centered(|ui| {
                             ui.label(
@@ -819,10 +834,7 @@ fn draw_gap_tester(
                                     .color(Color32::GRAY),
                             );
                             ui.label(
-                                RichText::new(format!("{} ms", stats.recommended_nobd()))
-                                    .size(48.0)
-                                    .strong()
-                                    .color(TEAL),
+                                RichText::new(format!("{rec} ms")).size(48.0).strong().color(col),
                             );
                             ui.label(
                                 RichText::new(format!(
@@ -834,6 +846,42 @@ fn draw_gap_tester(
                             );
                         });
                     });
+                ui.add_space(6.0);
+
+                // What the gap means + the ~8ms execution threshold.
+                egui::CollapsingHeader::new(
+                    RichText::new("\u{24D8}  What your finger gap means").color(TEAL),
+                )
+                .default_open(false)
+                .show(ui, |ui| {
+                    ui.label(
+                        "Your \u{201C}finger gap\u{201D} is the real time between the two buttons when \
+                         you press them together (e.g. LP+HP for a dash). The recommended window is \
+                         that gap plus a little headroom.",
+                    );
+                    ui.add_space(4.0);
+                    ui.label(
+                        "Clean execution sits low \u{2014} a few ms. In MvC2 you have ~one frame \
+                         (16.67ms) for both buttons to land on the same read, and a well-formed \
+                         two-button intent usually comes together in under ~8ms. As your gap climbs \
+                         past that, the window is no longer just covering normal timing \u{2014} it's \
+                         compensating for something.",
+                    );
+                    ui.add_space(6.0);
+                    ui.colored_label(GREEN, "\u{25CF} \u{2264}5 ms \u{2014} tight, clean execution.");
+                    ui.colored_label(
+                        ORANGE,
+                        "\u{25CF} 6\u{2013}10 ms \u{2014} getting loose; you're around/over the ~8ms \
+                         intent window. Watch your timing.",
+                    );
+                    ui.colored_label(
+                        RED,
+                        "\u{25CF} 11\u{2013}16 ms \u{2014} well beyond normal. Likely an execution habit \
+                         (pressing too far apart) OR a button/hardware issue: switch chatter or lag, a \
+                         sticky button, or low controller polling. Check those before leaning on a wide \
+                         window.",
+                    );
+                });
                 ui.add_space(8.0);
             }
         } else {
