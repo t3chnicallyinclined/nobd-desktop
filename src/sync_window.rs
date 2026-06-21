@@ -30,11 +30,20 @@ pub struct SyncWindow {
     // and "spanning two polls" only means >1ms apart, NOT a frame straddle —
     // there the hook counts saves accurately instead.
     pub record_saves: bool,
+    // Which player slot (0 = P1, 1 = P2) this window's stats are recorded under.
+    pub player: usize,
 }
 
 impl Default for SyncWindow {
     fn default() -> Self {
-        Self { committed: 0, pending: None, record_saves: true }
+        Self { committed: 0, pending: None, record_saves: true, player: 0 }
+    }
+}
+
+impl SyncWindow {
+    /// A window whose stats are recorded under the given player slot.
+    pub fn with_player(player: usize) -> Self {
+        Self { player, ..Self::default() }
     }
 }
 
@@ -90,7 +99,7 @@ impl SyncWindow {
                 // A partner is joining an already-open window — the elapsed time
                 // is the measured finger gap between the lead and this press.
                 if let Some(t) = start {
-                    crate::config::record_gap(t.elapsed().as_micros() as u64);
+                    crate::config::record_gap(self.player, t.elapsed().as_micros() as u64);
                 }
                 sync_new |= just_pressed;
             }
@@ -105,14 +114,14 @@ impl SyncWindow {
             let grouped = (sync_new & attack_mask).count_ones() >= 2;
             if grouped || held.as_millis() >= window {
                 self.committed |= sync_new;
-                crate::config::record_delivery(sync_new);
+                crate::config::record_delivery(self.player, sync_new);
                 // Real added latency = how long the leading press was held back.
-                crate::config::record_latency(held.as_micros() as u64);
+                crate::config::record_latency(self.player, held.as_micros() as u64);
                 // Frame-boundary save: a grouped commit whose lead press was
                 // already pending from a prior poll → the partner arrived on a
                 // later frame. (Same-poll already-grouped presses don't count.)
                 if grouped && was_pending && self.record_saves {
-                    crate::config::record_save();
+                    crate::config::record_save(self.player);
                 }
                 sync_new = 0;
                 start = None;

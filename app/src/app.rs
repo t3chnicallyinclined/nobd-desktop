@@ -33,6 +33,9 @@ fn rec_color(ms: u32) -> Color32 {
 // Last DLL heartbeat we saw, to detect whether the in-game hook is actively polling.
 static LAST_HB: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+// Which player's live stats the NOBD Sync tab is showing (0 = P1, 1 = P2).
+static STATS_PLAYER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 #[derive(PartialEq, Clone, Copy)]
 enum Tab {
     NobdSync,
@@ -500,22 +503,34 @@ fn draw_nobd_sync(ctx: &egui::Context, hook_live: bool, dll_installed: bool) {
         ui.add_space(10.0);
         ui.separator();
 
-        // ── Live stats from the in-game hook ──
-        ui.label(RichText::new("Live in-game stats").strong().size(16.0));
-        let groups = s.groups.load(Ordering::Relaxed);
-        let singles = s.singles.load(Ordering::Relaxed);
-        let saves = s.saves.load(Ordering::Relaxed);
-        let (lat_avg, lat_max) = s.latency_ms();
-        let (gap_avg, gap_max) = s.finger_gap_ms();
-        let rec = s.recommended_window_ms();
-        let frame_us = s.frame_us.load(Ordering::Relaxed);
+        // ── Live stats from the in-game hook (per player) ──
+        let sel = STATS_PLAYER.load(Ordering::Relaxed).min(nobd_shared::NUM_PLAYERS - 1);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Live in-game stats").strong().size(16.0));
+            ui.add_space(8.0);
+            for pl in 0..nobd_shared::NUM_PLAYERS {
+                let act = s.players[pl].active();
+                let txt = if act { format!("P{} \u{25CF}", pl + 1) } else { format!("P{}", pl + 1) };
+                if ui.selectable_label(sel == pl, txt).clicked() {
+                    STATS_PLAYER.store(pl, Ordering::Relaxed);
+                }
+            }
+        });
+        let ps = &s.players[sel];
+        let groups = ps.groups.load(Ordering::Relaxed);
+        let singles = ps.singles.load(Ordering::Relaxed);
+        let saves = ps.saves.load(Ordering::Relaxed);
+        let (lat_avg, lat_max) = ps.latency_ms();
+        let (gap_avg, gap_max) = ps.finger_gap_ms();
+        let rec = ps.recommended_window_ms();
+        let frame_us = ps.frame_us.load(Ordering::Relaxed);
         let poll_hz = s.poll_hz.load(Ordering::Relaxed);
-        let (gp_avg, gp_max) = s.game_perceived_ms();
+        let (gp_avg, gp_max) = ps.game_perceived_ms();
 
         // Headline: when sync is ON, frame-boundary splits we CAUGHT (saves).
         // When OFF, the passive monitor shows the splits that ACTUALLY occurred.
-        let attempts = s.attempts.load(Ordering::Relaxed);
-        let misses = s.misses.load(Ordering::Relaxed);
+        let attempts = ps.attempts.load(Ordering::Relaxed);
+        let misses = ps.misses.load(Ordering::Relaxed);
         if enabled {
             ui.horizontal(|ui| {
                 ui.label(RichText::new(format!("{saves}")).size(34.0).strong().color(GREEN));
@@ -639,8 +654,8 @@ fn draw_nobd_sync(ctx: &egui::Context, hook_live: bool, dll_installed: bool) {
                 ui.end_row();
 
                 ui.label("Waited a frame:");
-                let waits = s.frame_waits.load(Ordering::Relaxed);
-                let dels = s.gp_lat_count.load(Ordering::Relaxed);
+                let waits = ps.frame_waits.load(Ordering::Relaxed);
+                let dels = ps.gp_lat_count.load(Ordering::Relaxed);
                 if dels > 0 {
                     let pct = waits as f64 / dels as f64 * 100.0;
                     ui.colored_label(

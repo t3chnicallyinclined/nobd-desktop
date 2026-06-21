@@ -1,7 +1,8 @@
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{LazyLock, Mutex, OnceLock};
 use windows_sys::Win32::System::Memory::{VirtualProtect, PAGE_READWRITE};
+use nobd_shared::NUM_PLAYERS;
 use crate::sync_window::SyncWindow;
 use crate::log::log;
 
@@ -29,8 +30,40 @@ type GetDeviceDataFn = unsafe extern "system" fn(
 static REAL_CREATE_DEVICE:    OnceLock<CreateDeviceFn>   = OnceLock::new();
 static REAL_GET_DEVICE_STATE: OnceLock<GetDeviceStateFn> = OnceLock::new();
 static REAL_GET_DEVICE_DATA:  OnceLock<GetDeviceDataFn>  = OnceLock::new();
-static SW: LazyLock<Mutex<SyncWindow>> =
-    LazyLock::new(|| Mutex::new(SyncWindow::default()));
+
+// Per-player sync window, keyed by device pointer → slot (first device hooked =
+// P1, second = P2). MvC2 uses XInput, so this DInput path is a fallback.
+static DI_SW: LazyLock<[Mutex<SyncWindow>; NUM_PLAYERS]> =
+    LazyLock::new(|| [Mutex::new(SyncWindow::with_player(0)), Mutex::new(SyncWindow::with_player(1))]);
+static DI_DEVICE_PTRS: [AtomicUsize; NUM_PLAYERS] = [const { AtomicUsize::new(0) }; NUM_PLAYERS];
+
+/// Register a DInput device pointer into the next free player slot (idempotent).
+fn assign_slot(device: usize) -> usize {
+    for s in 0..NUM_PLAYERS {
+        if DI_DEVICE_PTRS[s].load(Ordering::Relaxed) == device {
+            return s;
+        }
+    }
+    for s in 0..NUM_PLAYERS {
+        if DI_DEVICE_PTRS[s]
+            .compare_exchange(0, device, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            return s;
+        }
+    }
+    0 // more devices than slots — fold extras into P1
+}
+
+/// Slot for an already-registered device pointer (defaults to P1 if unknown).
+fn slot_for(device: usize) -> usize {
+    for s in 0..NUM_PLAYERS {
+        if DI_DEVICE_PTRS[s].load(Ordering::Relaxed) == device {
+            return s;
+        }
+    }
+    0
+}
 
 // --- diagnostics ---
 static GDS_CALLS: AtomicU64 = AtomicU64::new(0); // GetDeviceState call count
@@ -89,7 +122,8 @@ unsafe extern "system" fn our_create_device(
 }
 
 unsafe fn hook_device(device: *mut c_void) {
-    log(&format!("hook_device: patching slots {SLOT_GET_DEVICE_STATE}+{SLOT_GET_DEVICE_DATA} on {:p}", device));
+    let slot = assign_slot(device as usize);
+    log(&format!("hook_device: P{} patching slots {SLOT_GET_DEVICE_STATE}+{SLOT_GET_DEVICE_DATA} on {:p}", slot + 1, device));
     match unsafe { patch_vtable_slot(device, SLOT_GET_DEVICE_STATE, our_get_device_state as *const ()) } {
         Some(orig) => { REAL_GET_DEVICE_STATE.get_or_init(|| unsafe { std::mem::transmute(orig) }); }
         None => log("hook_device: GetDeviceState patch failed"),
@@ -135,9 +169,11 @@ unsafe extern "system" fn our_get_device_state(
                 }
             }
 
-            // Sync window operates on attack buttons 0-7 (DInput layout).
+            // Sync window operates on attack buttons 0-7 (DInput layout). Route to
+            // this device's player slot so two pads sync independently.
             let raw = (all & 0x00FF) as u16;
-            if let Ok(mut sw) = SW.lock() {
+            let slot = slot_for(this as usize);
+            if let Ok(mut sw) = DI_SW[slot].lock() {
                 let filtered = sw.process(raw, crate::sync_window::ATTACK_MASK);
                 for i in 0..ATTACK_BTN_COUNT {
                     *btn_base.add(i) = if filtered & (1u16 << i) != 0 { 0x80 } else { 0x00 };
