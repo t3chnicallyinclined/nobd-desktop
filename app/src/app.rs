@@ -130,6 +130,7 @@ enum GapLogEntry {
         attempt: usize,
         button_a: String,
         button_b: String,
+        count: usize,
         gap_ms: f64,
         running_avg: f64,
         pre_fire: bool,
@@ -344,6 +345,7 @@ impl eframe::App for FingerGapApp {
                     attempt,
                     button_a: format_button(pair.button_a),
                     button_b: format_button(pair.button_b),
+                    count: pair.count,
                     gap_ms: pair.gap_ms,
                     running_avg,
                     pre_fire,
@@ -664,6 +666,7 @@ fn draw_gap_tester(&self, ctx: &egui::Context) {
         .map(|i| i.controllers())
         .unwrap_or_default();
     let log = &self.gap_log;
+    let report_hz = self.input.as_ref().and_then(|i| i.report_rate_hz());
 
     egui::TopBottomPanel::bottom("gap_log")
         .min_height(120.0)
@@ -681,6 +684,7 @@ fn draw_gap_tester(&self, ctx: &egui::Context) {
                                 attempt,
                                 button_a,
                                 button_b,
+                                count,
                                 gap_ms,
                                 running_avg,
                                 pre_fire,
@@ -694,9 +698,14 @@ fn draw_gap_tester(&self, ctx: &egui::Context) {
                                 } else {
                                     String::new()
                                 };
+                                let chord = if *count > 2 {
+                                    format!(" ({} buttons)", count)
+                                } else {
+                                    String::new()
+                                };
                                 ui.monospace(format!(
-                                    "[C{}] #{:>3}  {} + {}  gap: {:5.1}ms  (avg: {:.1}ms){}",
-                                    controller + 1, attempt, button_a, button_b, gap_ms, running_avg, pre_fire_str,
+                                    "[C{}] #{:>3}  {} + {}{}  gap: {:5.1}ms  (avg: {:.1}ms){}",
+                                    controller + 1, attempt, button_a, button_b, chord, gap_ms, running_avg, pre_fire_str,
                                 ));
                             }
                             GapLogEntry::Stray {
@@ -783,8 +792,6 @@ fn draw_gap_tester(&self, ctx: &egui::Context) {
         let ui = &mut cols[ci];
         let empty = GapStats::new();
         let stats: &GapStats = self.stats.get(*cidx).unwrap_or(&empty);
-        let stray_count = self.stray_counts.get(*cidx).copied().unwrap_or(0);
-        let bounce_count = self.bounce_counts.get(*cidx).copied().unwrap_or(0);
         ui.label(
             RichText::new(format!("C{}: {cname}", cidx + 1))
                 .strong().size(14.0)
@@ -792,44 +799,61 @@ fn draw_gap_tester(&self, ctx: &egui::Context) {
         );
         ui.separator();
 
-        if stats.count() > 0 || stray_count > 0 {
+        if stats.count() > 0 {
             ui.add_space(8.0);
 
-            // OBD / macro detection warning
-            let zero_pct = stats.zero_gap_pct();
-            if zero_pct > 50.0 {
-                egui::Frame::new()
-                    .inner_margin(12.0)
-                    .corner_radius(8.0)
-                    .stroke(egui::Stroke::new(2.0, YELLOW))
-                    .fill(Color32::from_rgb(40, 35, 15))
-                    .show(ui, |ui| {
-                        ui.vertical_centered(|ui| {
-                            ui.label(
-                                RichText::new("OBD / MACRO DETECTED")
-                                    .size(16.0)
-                                    .strong()
-                                    .color(YELLOW),
-                            );
-                            ui.label(
-                                RichText::new(format!(
-                                    "{:.0}% of your presses have 0ms gap — this looks like OBD or a macro button.",
-                                    zero_pct
-                                ))
-                                .size(13.0)
-                                .color(Color32::GRAY),
-                            );
-                            ui.label(
-                                RichText::new("Turn off OBD to measure your natural finger gap.")
-                                    .size(12.0)
-                                    .color(Color32::GRAY),
-                            );
+            // Grouping / NOBD-on detection. After the timing fix, genuinely
+            // simultaneous presses read ~0ms, so a high same-frame rate means
+            // presses are being grouped upstream (sync window / OBD / macro).
+            use crate::stats::Grouping;
+            let grp = stats.grouping();
+            let grouping_active = matches!(grp, Some(Grouping::Window) | Some(Grouping::AlwaysOn));
+            if let Some(g) = grp {
+                if g != Grouping::Natural {
+                    let sf = stats.same_frame_pct();
+                    let (title, body, accent) = match g {
+                        Grouping::AlwaysOn => (
+                            "GROUPING: ALWAYS ON",
+                            format!("{sf:.0}% of pairs landed in the same USB frame — looks like an OBD/turbo macro or a very wide sync window."),
+                            RED,
+                        ),
+                        Grouping::Window => (
+                            "SYNC WINDOW DETECTED",
+                            format!("{sf:.0}% of pairs landed same-frame — a NOBD/OBD sync window looks active; the rest still show your real gap."),
+                            YELLOW,
+                        ),
+                        Grouping::Hint => (
+                            "SOME SAME-FRAME PAIRS",
+                            format!("{sf:.0}% landed same-frame — light grouping, or just very fast hands."),
+                            ORANGE,
+                        ),
+                        Grouping::Natural => unreachable!(),
+                    };
+                    egui::Frame::new()
+                        .inner_margin(12.0)
+                        .corner_radius(8.0)
+                        .stroke(egui::Stroke::new(2.0, accent))
+                        .fill(Color32::from_rgb(38, 32, 18))
+                        .show(ui, |ui| {
+                            ui.vertical_centered(|ui| {
+                                ui.label(RichText::new(title).size(16.0).strong().color(accent));
+                                ui.label(RichText::new(body).size(13.0).color(Color32::GRAY));
+                                if grouping_active {
+                                    ui.label(
+                                        RichText::new("Turn off the sync window / OBD to measure your true finger gap.")
+                                            .size(12.0)
+                                            .color(Color32::GRAY),
+                                    );
+                                }
+                            });
                         });
-                    });
-                ui.add_space(4.0);
+                    ui.add_space(4.0);
+                }
             }
 
-            if stats.count() > 0 {
+            // A grouped sample corrupts the average, so the recommendation is
+            // only meaningful when presses aren't being grouped upstream.
+            if stats.count() > 0 && !grouping_active {
                 let rec = stats.recommended_nobd();
                 let col = rec_color(rec);
                 egui::Frame::new()
@@ -848,8 +872,8 @@ fn draw_gap_tester(&self, ctx: &egui::Context) {
                             );
                             ui.label(
                                 RichText::new(format!(
-                                    "based on your average gap of {:.1}ms + 1ms headroom",
-                                    stats.average()
+                                    "covers 95% of your gaps (p95 {:.1}ms) + 1ms headroom",
+                                    stats.percentile(0.95)
                                 ))
                                 .size(12.0)
                                 .color(Color32::GRAY),
@@ -878,30 +902,25 @@ fn draw_gap_tester(&self, ctx: &egui::Context) {
 
         ui.separator();
 
-        // Live stats (stacked, full column width — avoids text squish in a column).
-        draw_stat(ui, "Pairs", &format!("{}", stats.count()));
+        // Minimal stats — just what you need to read your finger gap.
         if stats.count() > 0 {
-            draw_stat(ui, "Average", &format!("{:.1}ms", stats.average()));
-            draw_stat(ui, "Median", &format!("{:.1}ms", stats.median()));
-            draw_stat(ui, "Fastest", &format!("{:.1}ms", stats.min()));
-            draw_stat(ui, "Slowest", &format!("{:.1}ms", stats.max()));
+            draw_stat(ui, "Average gap", &format!("{:.1}ms", stats.average()));
+            draw_stat(ui, "Range", &format!("{:.1}–{:.1}ms", stats.min(), stats.max()));
+            // How often a frame boundary would split your chord without NOBD.
+            let drop = stats.split_probability() * 100.0;
+            draw_stat_colored(ui, "Drop risk (no NOBD)", &format!("{drop:.0}%"),
+                if drop > 20.0 { RED } else if drop > 5.0 { YELLOW } else { GREEN });
+            draw_stat(ui, "Samples", &format!("{}", stats.count()));
         }
-        let total_sequences = stats.count() + stray_count;
-        let stray_pct = if total_sequences > 0 {
-            stray_count as f64 / total_sequences as f64 * 100.0
-        } else { 0.0 };
-        draw_stat_colored(ui, "Strays", &format!("{stray_count}"),
-            if stray_count > 0 { RED } else { Color32::WHITE });
-        if total_sequences > 0 {
-            draw_stat_colored(ui, "Stray rate", &format!("{stray_pct:.1}%"),
-                if stray_pct > 10.0 { RED } else if stray_pct > 0.0 { YELLOW } else { GREEN });
-        }
-        draw_stat_colored(ui, "Bounces", &format!("{bounce_count}"),
-            if bounce_count > 0 { ORANGE } else { Color32::WHITE });
-        if stats.count() > 0 {
-            let pf_count = stats.pre_fire_count();
-            let pf_pct = pf_count as f64 / stats.count() as f64 * 100.0;
-            draw_stat(ui, "Pre-fire", &format!("{pf_count} ({pf_pct:.0}%)"));
+
+        // Report-rate footnote (low ≈ Steam Input resampling; use native XInput).
+        if let Some(hz) = report_hz {
+            ui.add_space(2.0);
+            ui.label(
+                RichText::new(format!("report rate ~{hz:.0} Hz"))
+                    .size(11.0)
+                    .color(if hz >= 500.0 { Color32::DARK_GRAY } else { YELLOW }),
+            );
         }
 
         }

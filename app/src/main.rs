@@ -4,6 +4,7 @@
 mod app;
 mod input;
 mod install;
+mod logo;
 mod monitor;
 mod persist;
 mod stats;
@@ -26,6 +27,11 @@ fn main() -> eframe::Result {
             .with_inner_size([820.0, 640.0])
             .with_min_inner_size([640.0, 480.0])
             .with_title("NOBD Desktop")
+            .with_icon(std::sync::Arc::new(egui::IconData {
+                rgba: logo::rgba(256, true),
+                width: 256,
+                height: 256,
+            }))
             // Start hidden — the app lives in the tray; left-click the icon to open.
             .with_visible(false),
         ..Default::default()

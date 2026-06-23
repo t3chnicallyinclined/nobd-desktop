@@ -64,20 +64,10 @@ impl Tray {
 }
 
 fn make_icon() -> Icon {
+    // The full branded app icon (dark rounded square + brackets + press-dots),
+    // rendered at 32px for the tray. Same artwork as the window/taskbar icon.
     let size = 32u32;
-    let (cx, cy, r) = (15.5f32, 15.5f32, 14.0f32);
-    let mut rgba = Vec::with_capacity((size * size * 4) as usize);
-    for y in 0..size {
-        for x in 0..size {
-            let dx = x as f32 - cx;
-            let dy = y as f32 - cy;
-            if dx * dx + dy * dy <= r * r {
-                rgba.extend_from_slice(&[0, 180, 216, 255]);
-            } else {
-                rgba.extend_from_slice(&[0, 0, 0, 0]);
-            }
-        }
-    }
+    let rgba = crate::logo::rgba(size, true);
     Icon::from_rgba(rgba, size, size).expect("tray icon")
 }
 

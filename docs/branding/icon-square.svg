@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="NOBD">
+  <!-- app-icon background -->
+  <rect width="512" height="512" rx="112" fill="#121218"/>
+  <!-- the frame: square brackets -->
+  <g fill="none" stroke="#E8ECF3" stroke-width="28" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M150 148 H96 V364 H150"/>
+    <path d="M362 148 H416 V364 H362"/>
+  </g>
+  <!-- two button presses landing in the same frame -->
+  <defs>
+    <clipPath id="amberClip"><circle cx="316" cy="256" r="82"/></clipPath>
+  </defs>
+  <circle cx="196" cy="256" r="82" fill="#8B5CF6"/>
+  <circle cx="316" cy="256" r="82" fill="#FFD60A"/>
+  <!-- the lens where they meet: the moment both land together -->
+  <circle cx="196" cy="256" r="82" fill="#F4F7FA" clip-path="url(#amberClip)"/>
+</svg>
