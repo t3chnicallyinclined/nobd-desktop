@@ -19,9 +19,21 @@
 use gilrs::Button;
 use std::collections::HashMap;
 use std::sync::mpsc::{self, Receiver};
+use std::sync::OnceLock;
 use std::thread;
 use std::time::{Duration, Instant};
 use windows_sys::Win32::Media::timeBeginPeriod;
+
+/// Fixed session epoch for the free-running game-poll simulation. Anchored once,
+/// the first time it's read — NEVER reset on input, so presses fall at random
+/// phase relative to the simulated 60 fps clock (exactly like a real game poll).
+static EPOCH: OnceLock<Instant> = OnceLock::new();
+
+/// Milliseconds from the session epoch to `t` (saturating).
+fn session_ms(t: Instant) -> f64 {
+    let e = *EPOCH.get_or_init(Instant::now);
+    t.saturating_duration_since(e).as_secs_f64() * 1000.0
+}
 use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 use windows_sys::Win32::System::SystemInformation::GetSystemDirectoryW;
 use windows_sys::Win32::UI::Input::XboxController::XINPUT_STATE;
@@ -94,6 +106,11 @@ pub struct ButtonPair {
     pub count: usize,
     /// Spread between the first and last press of the chord (ms).
     pub gap_ms: f64,
+    /// Every button in the chord, in press order (for fixed-combo detection).
+    pub buttons: Vec<Button>,
+    /// First-press time in ms since the session epoch — its phase against the
+    /// free-running 60 fps clock drives the game-frame split simulation.
+    pub t0_ms: f64,
     pub controller: usize,
 }
 
@@ -233,6 +250,8 @@ fn finalize_cluster(
             button_b: cl.last().0,
             count: cl.presses.len(),
             gap_ms: cl.spread_ms(),
+            buttons: cl.presses.iter().map(|(b, _)| *b).collect(),
+            t0_ms: session_ms(cl.first().1),
             controller: c,
         });
     } else {

@@ -133,7 +133,8 @@ enum GapLogEntry {
         count: usize,
         gap_ms: f64,
         running_avg: f64,
-        pre_fire: bool,
+        /// Would a 60 fps game have read the two presses on different frames?
+        split: bool,
     },
     Stray {
         controller: usize,
@@ -155,6 +156,8 @@ pub struct FingerGapApp {
     stats: Vec<GapStats>,
     stray_counts: Vec<usize>,
     bounce_counts: Vec<usize>,
+    // Monotonic chords per controller (the log's "#N", independent of the window).
+    total_pairs: Vec<usize>,
     gap_log: Vec<GapLogEntry>,
     monitor: ButtonMonitor,
     active_tab: Tab,
@@ -163,6 +166,8 @@ pub struct FingerGapApp {
     game_path: String,
     install_msg: String,
     last_cfg: crate::persist::Cfg,
+    /// Sliding-window size (recent chords) the grouping verdict is judged over.
+    decision_window: usize,
 }
 
 impl FingerGapApp {
@@ -181,6 +186,7 @@ impl FingerGapApp {
             stats: Vec::new(),
             stray_counts: Vec::new(),
             bounce_counts: Vec::new(),
+            total_pairs: Vec::new(),
             gap_log: Vec::new(),
             monitor: ButtonMonitor::new(),
             active_tab: Tab::NobdSync,
@@ -189,6 +195,7 @@ impl FingerGapApp {
             game_path,
             install_msg: String::new(),
             last_cfg,
+            decision_window: crate::stats::DEFAULT_WINDOW,
         }
     }
 }
@@ -200,6 +207,7 @@ impl FingerGapApp {
             self.stats.resize_with(c + 1, GapStats::new);
             self.stray_counts.resize(c + 1, 0);
             self.bounce_counts.resize(c + 1, 0);
+            self.total_pairs.resize(c + 1, 0);
         }
     }
 
@@ -333,13 +341,30 @@ impl eframe::App for FingerGapApp {
                     InputEvent::Released(btn) => self.monitor.on_release(*c, *btn),
                 }
             }
+            // Measured USB frame size (ms) so same-frame bucketing adapts to the
+            // device cadence; and the current decision window. Read once here to
+            // avoid borrowing self.input while mutating self.stats below.
+            let frame_ms = self
+                .input
+                .as_ref()
+                .and_then(|i| i.report_rate_hz())
+                .filter(|h| *h > 0.0)
+                .map(|h| 1000.0 / h);
+            let dw = self.decision_window;
+
             for pair in result.pairs {
                 let c = pair.controller;
                 self.ensure_pad(c);
-                self.stats[c].record(pair.gap_ms);
+                self.stats[c].set_window(dw);
+                if let Some(fm) = frame_ms {
+                    self.stats[c].set_frame_ms(fm);
+                }
+                self.stats[c].record_chord(pair.gap_ms, &pair.buttons, pair.t0_ms);
                 let running_avg = self.stats[c].average();
-                let attempt = self.stats[c].count();
-                let pre_fire = pair.gap_ms >= 1.0;
+                self.total_pairs[c] += 1;
+                let attempt = self.total_pairs[c];
+                // Would a free-running 60fps game poll have split this chord?
+                let split = crate::stats::game_frame_split(pair.t0_ms, pair.gap_ms);
                 self.push_log(GapLogEntry::Pair {
                     controller: c,
                     attempt,
@@ -348,12 +373,16 @@ impl eframe::App for FingerGapApp {
                     count: pair.count,
                     gap_ms: pair.gap_ms,
                     running_avg,
-                    pre_fire,
+                    split,
                 });
             }
             for stray in result.strays {
                 let c = stray.controller;
                 self.ensure_pad(c);
+                self.stats[c].set_window(dw);
+                // A solo = a single attack button that registered alone — the tell
+                // that singles still pass through (sync window, not an OBD macro).
+                self.stats[c].record_solo();
                 self.stray_counts[c] += 1;
                 self.push_log(GapLogEntry::Stray {
                     controller: c,
@@ -400,6 +429,7 @@ impl eframe::App for FingerGapApp {
                         self.stats.clear();
                         self.stray_counts.clear();
                         self.bounce_counts.clear();
+                        self.total_pairs.clear();
                         self.gap_log.clear();
                         self.monitor.clear();
                         // …and the live in-game (shared-memory) NOBD stats.
@@ -465,6 +495,23 @@ impl eframe::App for FingerGapApp {
                     RichText::new("  Install  ").size(15.0),
                 );
             });
+
+            // Decision window — the grouping verdict is judged over only the last
+            // N chords, so it re-decides live and flips when you toggle NOBD
+            // mid-session (no Reset needed). Only relevant on the Gap Tester tab.
+            if self.active_tab == Tab::GapTester {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Decision window").size(12.0).color(Color32::GRAY));
+                    ui.add(
+                        egui::Slider::new(
+                            &mut self.decision_window,
+                            crate::stats::MIN_WINDOW..=crate::stats::MAX_WINDOW,
+                        )
+                        .suffix(" chords"),
+                    )
+                    .on_hover_text("How many recent chords the ON/OFF verdict is based on. Lower = flips faster when you toggle NOBD; higher = steadier.");
+                });
+            }
         });
 
         match self.active_tab {
@@ -506,6 +553,16 @@ fn draw_nobd_sync(ctx: &egui::Context, hook_live: bool, dll_installed: bool) {
                 ui.label("DLL not installed \u{2014} open the Install tab to set it up");
             }
         });
+        // Scope note: the sync is an in-game DLL hook, not a system-wide driver.
+        ui.label(
+            RichText::new(
+                "Note: the NOBD sync runs inside the game via the injected DLL. It only conditions \
+                 inputs while MvC2 is running with the hook LIVE (above) \u{2014} it does not change \
+                 your controller system-wide or in other apps.",
+            )
+            .size(11.0)
+            .color(Color32::GRAY),
+        );
         ui.separator();
 
         // ── Master control ──
@@ -687,26 +744,25 @@ fn draw_gap_tester(&self, ctx: &egui::Context) {
                                 count,
                                 gap_ms,
                                 running_avg,
-                                pre_fire,
+                                split,
                             } => {
-                                let pre_fire_str = if *pre_fire {
-                                    format!(
-                                        "  ** PRE-FIRE: {} solo ~{} frame(s)",
-                                        button_a,
-                                        (*gap_ms as u32).max(1)
-                                    )
-                                } else {
-                                    String::new()
-                                };
                                 let chord = if *count > 2 {
                                     format!(" ({} buttons)", count)
                                 } else {
                                     String::new()
                                 };
-                                ui.monospace(format!(
-                                    "[C{}] #{:>3}  {} + {}{}  gap: {:5.1}ms  (avg: {:.1}ms){}",
-                                    controller + 1, attempt, button_a, button_b, chord, gap_ms, running_avg, pre_fire_str,
-                                ));
+                                ui.horizontal(|ui| {
+                                    ui.monospace(format!(
+                                        "[C{}] #{:>3}  {} + {}{}  gap: {:5.1}ms  (avg: {:.1}ms)",
+                                        controller + 1, attempt, button_a, button_b, chord, gap_ms, running_avg,
+                                    ));
+                                    // At 60fps, would the game read both on the same frame?
+                                    if *split {
+                                        ui.monospace(RichText::new("→ 60fps: SPLIT").strong().color(RED));
+                                    } else {
+                                        ui.monospace(RichText::new("→ 60fps: same frame").color(GREEN));
+                                    }
+                                });
                             }
                             GapLogEntry::Stray {
                                 controller,
@@ -771,6 +827,20 @@ fn draw_gap_tester(&self, ctx: &egui::Context) {
         });
 
     egui::CentralPanel::default().show(ctx, |ui| {
+        // Scope note: the tester reads the controller directly (XInput), so it
+        // reflects the CONTROLLER's own behavior/firmware — it does not see this
+        // app's in-game NOBD sync (that runs in the game via the DLL).
+        ui.add_space(4.0);
+        ui.label(
+            RichText::new(
+                "Reads your controller directly \u{2014} this shows the controller's own input behavior \
+                 (e.g. firmware-level grouping). It does NOT reflect this app's in-game NOBD sync, \
+                 which conditions MvC2's inputs separately.",
+            )
+            .size(11.0)
+            .color(Color32::GRAY),
+        );
+        ui.separator();
         if controllers.is_empty() {
             ui.add_space(20.0);
             ui.vertical_centered(|ui| {
@@ -805,51 +875,8 @@ fn draw_gap_tester(&self, ctx: &egui::Context) {
             // Grouping / NOBD-on detection. After the timing fix, genuinely
             // simultaneous presses read ~0ms, so a high same-frame rate means
             // presses are being grouped upstream (sync window / OBD / macro).
-            use crate::stats::Grouping;
-            let grp = stats.grouping();
-            let grouping_active = matches!(grp, Some(Grouping::Window) | Some(Grouping::AlwaysOn));
-            if let Some(g) = grp {
-                if g != Grouping::Natural {
-                    let sf = stats.same_frame_pct();
-                    let (title, body, accent) = match g {
-                        Grouping::AlwaysOn => (
-                            "GROUPING: ALWAYS ON",
-                            format!("{sf:.0}% of pairs landed in the same USB frame — looks like an OBD/turbo macro or a very wide sync window."),
-                            RED,
-                        ),
-                        Grouping::Window => (
-                            "SYNC WINDOW DETECTED",
-                            format!("{sf:.0}% of pairs landed same-frame — a NOBD/OBD sync window looks active; the rest still show your real gap."),
-                            YELLOW,
-                        ),
-                        Grouping::Hint => (
-                            "SOME SAME-FRAME PAIRS",
-                            format!("{sf:.0}% landed same-frame — light grouping, or just very fast hands."),
-                            ORANGE,
-                        ),
-                        Grouping::Natural => unreachable!(),
-                    };
-                    egui::Frame::new()
-                        .inner_margin(12.0)
-                        .corner_radius(8.0)
-                        .stroke(egui::Stroke::new(2.0, accent))
-                        .fill(Color32::from_rgb(38, 32, 18))
-                        .show(ui, |ui| {
-                            ui.vertical_centered(|ui| {
-                                ui.label(RichText::new(title).size(16.0).strong().color(accent));
-                                ui.label(RichText::new(body).size(13.0).color(Color32::GRAY));
-                                if grouping_active {
-                                    ui.label(
-                                        RichText::new("Turn off the sync window / OBD to measure your true finger gap.")
-                                            .size(12.0)
-                                            .color(Color32::GRAY),
-                                    );
-                                }
-                            });
-                        });
-                    ui.add_space(4.0);
-                }
-            }
+            let grouping_active = stats.grouping_active();
+            draw_grouping_verdict(ui, stats);
 
             // A grouped sample corrupts the average, so the recommendation is
             // only meaningful when presses aren't being grouped upstream.
@@ -908,9 +935,21 @@ fn draw_gap_tester(&self, ctx: &egui::Context) {
             draw_stat(ui, "Range", &format!("{:.1}–{:.1}ms", stats.min(), stats.max()));
             // How often a frame boundary would split your chord without NOBD.
             let drop = stats.split_probability() * 100.0;
-            draw_stat_colored(ui, "Drop risk (no NOBD)", &format!("{drop:.0}%"),
+            draw_stat_colored(ui, "Frame-split chance @60fps", &format!("{drop:.0}%"),
                 if drop > 20.0 { RED } else if drop > 5.0 { YELLOW } else { GREEN });
-            draw_stat(ui, "Samples", &format!("{}", stats.count()));
+            draw_stat(ui, "Splits seen @60fps",
+                &format!("{} / {}", stats.simulated_split_count(), stats.count()));
+            draw_stat(ui, "Samples (window)", &format!("{} / {}", stats.count(), stats.window()));
+
+            ui.add_space(6.0);
+            ui.label(RichText::new("— Grouping evidence —").size(12.0).color(Color32::DARK_GRAY));
+            let sf = stats.same_frame_pct();
+            draw_stat_colored(ui, "Same-frame rate", &format!("{sf:.0}%"),
+                if sf >= 30.0 { TEAL } else { GREEN });
+            draw_stat(ui, "Dead zone", &format!("{} frame(s)", stats.dead_zone_frames()));
+            draw_stat(ui, "Solo presses", &format!("{}", stats.solo_count()));
+            draw_stat(ui, "Distinct chords", &format!("{}", stats.distinct_chords()));
+            draw_stat(ui, "USB frame size", &format!("{:.2}ms", stats.frame_ms()));
         }
 
         // Report-rate footnote (low ≈ Steam Input resampling; use native XInput).
@@ -1046,4 +1085,122 @@ fn draw_stat_colored(ui: &mut Ui, label: &str, value: &str, color: Color32) {
         ui.label(RichText::new(format!("{label}:")).color(Color32::GRAY));
         ui.label(RichText::new(value).strong().color(color));
     });
+}
+
+/// The headline NOBD/grouping verdict — a banner you can watch flip when you
+/// toggle the firmware's sync window on and off. Judged over the sliding window.
+fn draw_grouping_verdict(ui: &mut Ui, stats: &GapStats) {
+    use crate::stats::Grouping;
+
+    let sf = stats.same_frame_pct();
+    let grouping_active = stats.grouping_active();
+
+    let grp = match stats.grouping() {
+        Some(g) => g,
+        None => {
+            let left = stats.samples_until_verdict();
+            banner(
+                ui,
+                Color32::from_rgb(40, 40, 50),
+                Color32::from_rgb(24, 24, 32),
+                "COLLECTING…",
+                &format!("Press two buttons together {left} more time(s) for a verdict."),
+                None,
+            );
+            return;
+        }
+    };
+
+    let (accent, title, body): (Color32, &str, String) = match grp {
+        Grouping::Natural => (
+            GREEN,
+            "GROUPING OFF — natural finger timing",
+            format!(
+                "Only {sf:.0}% of chords landed in the same USB frame; the rest spread across frames like real fingers. \
+                 No sync window / buffering detected on this controller."
+            ),
+        ),
+        Grouping::Window => {
+            let win = stats
+                .estimated_window_ms()
+                .map(|w| format!(" Estimated window ≈ {w:.0} ms."))
+                .unwrap_or_default();
+            (
+                TEAL,
+                "GROUPING DETECTED — sync window",
+                format!(
+                    "{sf:.0}% of chords collapsed onto the same USB frame.{win} \
+                     Near-simultaneous presses are being grouped, while single buttons still register on their own."
+                ),
+            )
+        }
+        Grouping::AlwaysOn => (
+            TEAL,
+            "GROUPING DETECTED",
+            format!(
+                "{sf:.0}% of chords landed on a single USB frame, consistently the same button set. \
+                 Multi-button presses are being aligned to the same frame."
+            ),
+        ),
+        Grouping::Hint => (
+            YELLOW,
+            "INCONCLUSIVE — some same-frame chords",
+            format!(
+                "{sf:.0}% landed same-frame — could be light grouping or just very fast hands. \
+                 Keep going, or mash two buttons together repeatedly."
+            ),
+        ),
+    };
+
+    let dz = stats.dead_zone_frames();
+    const GROUPING_NOTE: &str =
+        "Grouping detected: several buttons are being committed on the same USB frame — \
+         deliberate input conditioning, not your finger timing. Single buttons are unaffected. \
+         Press a few singles and vary your timing to characterize it fully.";
+    let detail = if grouping_active {
+        if dz >= 1 {
+            Some(format!(
+                "{GROUPING_NOTE} Dead zone: {dz} empty frame(s) before your first real gap."
+            ))
+        } else {
+            Some(GROUPING_NOTE.to_string())
+        }
+    } else {
+        Some(format!(
+            "Without grouping, at 60fps ~{:.0}% of recent chords would split across a game-frame boundary ({} of {}).",
+            stats.simulated_split_rate() * 100.0,
+            stats.simulated_split_count(),
+            stats.count()
+        ))
+    };
+
+    banner(ui, accent, Color32::from_rgb(22, 30, 30), title, &body, detail.as_deref());
+}
+
+/// Shared bordered banner used by the grouping verdict.
+fn banner(
+    ui: &mut Ui,
+    accent: Color32,
+    fill: Color32,
+    title: &str,
+    body: &str,
+    detail: Option<&str>,
+) {
+    egui::Frame::new()
+        .inner_margin(12.0)
+        .corner_radius(8.0)
+        .stroke(egui::Stroke::new(2.0, accent))
+        .fill(fill)
+        .show(ui, |ui| {
+            ui.vertical_centered(|ui| {
+                ui.label(RichText::new(title).size(16.0).strong().color(accent));
+                ui.add_space(2.0);
+                ui.label(RichText::new(body).size(12.0).color(Color32::LIGHT_GRAY));
+                if let Some(d) = detail {
+                    ui.add_space(2.0);
+                    ui.label(RichText::new(d).size(11.0).color(Color32::GRAY));
+                }
+            });
+        });
+    ui.add_space(6.0);
 }
