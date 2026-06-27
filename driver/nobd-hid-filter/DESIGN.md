@@ -116,6 +116,28 @@ To verify the HID filter it needs to read the **HID** device directly (raw HID /
 hidapi). Adding a "raw HID" source to the tester is the companion task — then
 "filter on vs off" in the tester is the grouping proof.
 
+## Plug-and-play strategy (handling every stick)
+
+Requiring a DInput-mode switch hurts UX, and XInput-only (Xbox-licensed) sticks
+can't switch at all. The plan to make it "just work" regardless:
+
+1. **HID *class* filter (this driver, refined).** Instead of a per-device INF
+   bound to one hardware ID, register as a **class filter** on HIDClass and bind
+   automatically to any HID gamepad. The driver checks the HID usage page
+   (Generic Desktop / Game Controls, usage 0x04/0x05) and only transforms actual
+   game controllers. → zero latency, plug-and-play, **DInput/HID sticks**.
+2. **xusb22 / USB lower filter (later).** XInput sticks speak the Xbox vendor
+   protocol through `xusb22.sys`, not HID. The same in-path idea applies one layer
+   over: a USB lower filter rewrites the 20-byte Xbox input report's button field.
+   → zero latency, plug-and-play, **XInput sticks**. More work (vendor protocol).
+3. **Virtual pad + HidHide (universal fallback).** Read the stick however it
+   presents, apply the window, present ONE synced virtual pad, hide the real one.
+   Works on *any* controller at a ~1 ms cost. The safety net when in-path filtering
+   can't bind.
+
+Build order: (1) now — prove the architecture on the easy class; (2) after; (3)
+keep in back pocket. All three share `SyncWindow.h` and the same verification bench.
+
 ## Verification loop (the payoff)
 
 1. Stick in DInput/HID mode, filter installed.
