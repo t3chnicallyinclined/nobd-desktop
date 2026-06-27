@@ -1,0 +1,47 @@
+; NOBD HID Filter (UMDF2) — installs as an UPPER filter on a HID gamepad.
+; SCAFFOLD: set the target hardware ID in [Standard.NTamd64] before installing,
+; and sign the package (test-signing for dev). See README.md.
+
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = HIDClass
+ClassGuid   = {745a17a0-74d3-11d0-b6fe-00a0c90f57da}
+Provider    = %ProviderName%
+CatalogFile = nobd-hid-filter.cat
+DriverVer   = ; set by stampinf / build
+PnpLockdown = 1
+
+[Manufacturer]
+%ProviderName% = Standard, NTamd64
+
+; TODO: replace HID\VID_xxxx&PID_xxxx with YOUR stick's hardware ID (DInput mode).
+[Standard.NTamd64]
+%DeviceDesc% = NobdHidFilter_Install, HID\VID_0000&PID_0000
+
+[NobdHidFilter_Install.NT]
+; Filters don't own the FDO; they register as an UpperFilter on the device.
+Include = WUDFRD.inf
+Needs   = WUDFRD.NT
+
+[NobdHidFilter_Install.NT.HW]
+AddReg = NobdHidFilter_Filter_AddReg
+
+[NobdHidFilter_Filter_AddReg]
+HKR,,"UpperFilters",0x00010000,"WUDFRd"
+
+[NobdHidFilter_Install.NT.Services]
+Include = WUDFRD.inf
+Needs   = WUDFRD.NT.Services
+
+[NobdHidFilter_Install.NT.Wdf]
+UmdfService              = NobdHidFilter, NobdHidFilter_Install
+UmdfServiceOrder         = NobdHidFilter
+UmdfKernelModeClientPolicy = AllowKernelModeClients
+
+[NobdHidFilter_Install]
+UmdfLibraryVersion = 2.31.0
+ServiceBinary      = %12%\UMDF\nobd-hid-filter.dll
+
+[Strings]
+ProviderName = "NOBD"
+DeviceDesc   = "NOBD HID Filter"
