@@ -1,34 +1,9 @@
 [workspace]
-members = [".", "app", "shared", "vigem-sync"]
+members = ["app", "shared", "vigem-sync"]
 resolver = "2"
 
-[package]
-name = "nobd-desktop"
-version = "0.3.0"
-edition = "2024"
-
-[lib]
-# Output is DINPUT8.dll — drop next to the game exe
-name = "DINPUT8"
-crate-type = ["cdylib"]
-
-[dependencies]
-nobd-shared = { path = "shared" }
-retour = "0.3"
-windows-sys = { version = "0.52", features = [
-    "Win32_Foundation",
-    "Win32_System_LibraryLoader",
-    "Win32_System_Memory",
-    "Win32_System_SystemServices",
-    "Win32_System_SystemInformation",
-    "Win32_UI_WindowsAndMessaging",
-    "Win32_UI_Shell",
-    "Win32_Graphics_Gdi",
-] }
-
+# Universal sync replaced the per-game DINPUT8.dll, so the cdylib package is gone.
 [profile.release]
-opt-level = "z"
+opt-level = 2
 lto = true
-codegen-units = 1
-panic = "abort"
 strip = true

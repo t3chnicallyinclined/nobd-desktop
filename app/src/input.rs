@@ -561,13 +561,6 @@ impl GamepadInput {
             .collect()
     }
 
-    /// Name of the first connected controller (for the header status line).
-    pub fn connected_gamepad_name(&self) -> Option<String> {
-        let i = self.connected.iter().position(|&c| c)?;
-        let name = self.names.get(i).filter(|n| !n.is_empty()).cloned();
-        Some(name.unwrap_or_else(|| format!("Controller {}", i + 1)))
-    }
-
     /// Measured device report rate in Hz (None until a few reports arrive).
     pub fn report_rate_hz(&self) -> Option<f64> {
         if self.report_interval_ms > 0.0 {

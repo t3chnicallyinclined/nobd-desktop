@@ -4,7 +4,6 @@
 mod app;
 mod hid;
 mod input;
-mod install;
 mod logo;
 mod monitor;
 mod persist;
