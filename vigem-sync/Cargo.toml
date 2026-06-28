@@ -1,0 +1,18 @@
+[package]
+name = "vigem-sync"
+version = "0.1.0"
+edition = "2021"
+description = "NOBD universal sync prototype — read controller, group inputs, present a synced virtual Xbox pad via ViGEm"
+
+[[bin]]
+name = "vigem-sync"
+path = "src/main.rs"
+
+[dependencies]
+nobd-shared = { path = "../shared" }
+vigem-client = "0.1"
+windows-sys = { version = "0.52", features = [
+    "Win32_Foundation",
+    "Win32_UI_Input_XboxController",
+    "Win32_Media",
+] }

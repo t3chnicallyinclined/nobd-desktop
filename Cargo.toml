@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "app", "shared"]
+members = [".", "app", "shared", "vigem-sync"]
 resolver = "2"
 
 [package]
