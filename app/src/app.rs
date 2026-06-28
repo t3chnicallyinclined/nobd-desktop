@@ -785,9 +785,13 @@ fn draw_gap_tester(&self, ctx: &egui::Context) {
         });
 
     egui::CentralPanel::default().show(ctx, |ui| {
-        // Scope note: the tester reads the controller directly (XInput), so it
-        // reflects the CONTROLLER's own behavior/firmware — it does not see this
-        // app's in-game NOBD sync (that runs in the game via the DLL).
+        // Which XInput slots are the real stick vs the synced NOBD pad (Xbox 360
+        // pad type only). Copy locals so the columns closure doesn't borrow self.
+        let nobd_slot = self.sync_service.virtual_slot();
+        let real_slot = self.sync_service.real_slot();
+        let sync_active = self.sync_service.is_active();
+        let is_xinput = self.source_kind == SourceKind::XInput;
+
         ui.add_space(4.0);
         ui.label(
             RichText::new(
@@ -811,6 +815,27 @@ fn draw_gap_tester(&self, ctx: &egui::Context) {
             }
         };
         ui.label(RichText::new(source_line).size(11.0).color(source_color));
+
+        // Call out which column is the NOBD pad to choose in-game.
+        if is_xinput && sync_active {
+            if let Some(vs) = nobd_slot {
+                egui::Frame::new()
+                    .inner_margin(8.0)
+                    .corner_radius(6.0)
+                    .stroke(egui::Stroke::new(2.0, TEAL))
+                    .show(ui, |ui| {
+                        ui.label(
+                            RichText::new(format!(
+                                "\u{25C9} System-wide sync is ON \u{2014} column C{} below is the NOBD VIRTUAL PAD. \
+                                 Select THAT controller in your game; the other column is your real stick.",
+                                vs + 1
+                            ))
+                            .size(12.0)
+                            .color(TEAL),
+                        );
+                    });
+            }
+        }
         ui.separator();
         if controllers.is_empty() {
             ui.add_space(20.0);
@@ -833,11 +858,19 @@ fn draw_gap_tester(&self, ctx: &egui::Context) {
         let ui = &mut cols[ci];
         let empty = GapStats::new();
         let stats: &GapStats = self.stats.get(*cidx).unwrap_or(&empty);
-        ui.label(
-            RichText::new(format!("C{}: {cname}", cidx + 1))
-                .strong().size(14.0)
-                .color(if stats.count() > 0 { TEAL } else { Color32::GRAY }),
-        );
+        let slot = *cidx as u32;
+        if is_xinput && nobd_slot == Some(slot) {
+            ui.label(RichText::new(format!("\u{25C9} C{}: NOBD VIRTUAL PAD", cidx + 1)).strong().size(14.0).color(TEAL));
+            ui.label(RichText::new("\u{2190} select this one in your game").size(11.0).color(TEAL));
+        } else if is_xinput && real_slot == Some(slot) {
+            ui.label(RichText::new(format!("C{}: {cname}  (your real stick)", cidx + 1)).strong().size(14.0).color(Color32::GRAY));
+        } else {
+            ui.label(
+                RichText::new(format!("C{}: {cname}", cidx + 1))
+                    .strong().size(14.0)
+                    .color(if stats.count() > 0 { TEAL } else { Color32::GRAY }),
+            );
+        }
         ui.separator();
 
         if stats.count() > 0 {

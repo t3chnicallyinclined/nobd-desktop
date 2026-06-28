@@ -144,6 +144,9 @@ pub struct SyncStatus {
     pub real_present: AtomicBool,
     /// XInput slot of the real pad (NO_SLOT until found).
     pub real_slot: AtomicU32,
+    /// XInput slot the virtual pad landed on (NO_SLOT if unknown / DS4 pad, which
+    /// isn't an XInput device).
+    pub virtual_slot: AtomicU32,
     /// ERR_* code.
     pub error: AtomicU8,
 }
@@ -154,6 +157,7 @@ impl SyncStatus {
             active: AtomicBool::new(false),
             real_present: AtomicBool::new(false),
             real_slot: AtomicU32::new(NO_SLOT),
+            virtual_slot: AtomicU32::new(NO_SLOT),
             error: AtomicU8::new(ERR_NONE),
         }
     }
@@ -188,6 +192,17 @@ impl SyncService {
 
     pub fn real_slot(&self) -> Option<u32> {
         let s = self.status.real_slot.load(Ordering::Relaxed);
+        if s == NO_SLOT {
+            None
+        } else {
+            Some(s)
+        }
+    }
+
+    /// XInput slot of the virtual NOBD pad (only known for the Xbox 360 pad type;
+    /// a DualShock 4 pad isn't an XInput device so this stays None).
+    pub fn virtual_slot(&self) -> Option<u32> {
+        let s = self.status.virtual_slot.load(Ordering::Relaxed);
         if s == NO_SLOT {
             None
         } else {
@@ -233,6 +248,10 @@ fn run(stop: Arc<AtomicBool>, status: Arc<SyncStatus>, pad: PadType) {
         std::thread::sleep(Duration::from_millis(500));
     };
 
+    // Snapshot connected XInput slots BEFORE plugging, so we can identify which
+    // new slot the virtual pad lands on (Xbox 360 pad type only).
+    let before: Vec<u32> = (0..4).filter(|&s| xinput_state(xi, s).is_some()).collect();
+
     let client = match vigem_client::Client::connect() {
         Ok(c) => c,
         Err(_) => {
@@ -260,6 +279,13 @@ fn run(stop: Arc<AtomicBool>, status: Arc<SyncStatus>, pad: PadType) {
             Target::D(t)
         }
     };
+
+    // Identify the virtual pad's XInput slot (the newly-connected one). DS4 pads
+    // aren't XInput, so this only resolves for the Xbox 360 pad type.
+    std::thread::sleep(Duration::from_millis(300)); // let XInput enumerate it
+    if let Some(vs) = (0..4).find(|&s| !before.contains(&s) && xinput_state(xi, s).is_some()) {
+        status.virtual_slot.store(vs, Ordering::Relaxed);
+    }
 
     unsafe { timeBeginPeriod(1) };
     status.active.store(true, Ordering::Relaxed);
