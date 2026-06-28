@@ -22,6 +22,14 @@ use windows_sys::Win32::UI::Input::XboxController::XINPUT_STATE;
 const ATTACK_MASK: u16 = 0xF300;
 const NO_SLOT: u32 = u32::MAX;
 
+/// Custom identity for the Xbox-360-style (still XInput, via ViGEm's MS_COMP_XUSB10
+/// compatible ID) virtual pad, so it's a DIFFERENT VID/PID than a genuine Xbox stick
+/// (045E/028E) and can be told apart. VID 0x1209 = pid.codes (open-source/hobby),
+/// PID 0x4E42 = "NB". Experimental — if a game stops recognizing it, revert to
+/// TargetId::XBOX360_WIRED.
+const NOBD_VID: u16 = 0x1209;
+const NOBD_PID: u16 = 0x4E42;
+
 /// error codes for `SyncStatus::error`
 pub const ERR_NONE: u8 = 0;
 pub const ERR_NO_XINPUT: u8 = 1;
@@ -261,7 +269,10 @@ fn run(stop: Arc<AtomicBool>, status: Arc<SyncStatus>, pad: PadType) {
     };
     let mut target = match pad {
         PadType::Xbox360 => {
-            let mut t = vigem_client::Xbox360Wired::new(client, vigem_client::TargetId::XBOX360_WIRED);
+            // Custom VID/PID (not the genuine Xbox 045E/028E) so it's distinguishable
+            // from a real Xbox stick — still XInput thanks to ViGEm's MS_COMP_XUSB10.
+            let id = vigem_client::TargetId { vendor: NOBD_VID, product: NOBD_PID };
+            let mut t = vigem_client::Xbox360Wired::new(client, id);
             if t.plugin().is_err() {
                 status.error.store(ERR_NO_VIGEM, Ordering::Relaxed);
                 return;

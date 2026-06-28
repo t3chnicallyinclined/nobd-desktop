@@ -518,7 +518,7 @@ fn draw_nobd_sync(
     use std::sync::atomic::Ordering;
     let s = nobd_shared::state();
     let steam_name = match pad {
-        PadType::Xbox360 => "Xbox 360 Controller",
+        PadType::Xbox360 => "XInput Controller (#N)",
         PadType::DualShock4 => "Wireless Controller (DualShock 4)",
     };
 
@@ -609,14 +609,14 @@ fn draw_nobd_sync(
             .show(ui, |ui| {
                 ui.label(RichText::new("Tips").strong().color(TEAL));
                 ui.label(
-                    "\u{2022}  Two identical \"Xbox 360 Controller\" entries in the list? Your real stick is \
-                     Xbox too. Set \"Virtual pad\" (top bar) to DualShock 4 \u{2014} the NOBD pad then shows \
-                     as a separate \"Wireless Controller\" so you can pick the right one.",
+                    "\u{2022}  The NOBD pad uses its OWN identity, so it's NOT labeled \"Xbox 360 Controller\" \
+                     (that's your real stick). In Steam it shows as \"XInput Controller #N\"; on the DualShock 4 \
+                     setting it shows as \"Wireless Controller\". Pick the NOBD one.",
                 );
                 ui.add_space(2.0);
                 ui.label(
-                    "\u{2022}  DualShock 4 mode works in Steam, emulators, and DInput games. Use Xbox 360 mode \
-                     for raw-XInput-only games launched outside Steam.",
+                    "\u{2022}  Xbox 360 mode stays XInput-native (works everywhere). DualShock 4 works in Steam / \
+                     emulators / DInput games, but not raw-XInput-only games launched outside Steam.",
                 );
                 ui.add_space(2.0);
                 ui.label(
@@ -791,9 +791,11 @@ fn draw_gap_tester(&self, ctx: &egui::Context) {
         let real_slot = self.sync_service.real_slot();
         let sync_active = self.sync_service.is_active();
         let is_xinput = self.source_kind == SourceKind::XInput;
-        // The synced pad's actual device name (what it shows as in a game).
+        // The synced pad's actual name in a game's controller list. The Xbox 360
+        // pad uses a custom NOBD VID, so games that don't recognize it (Steam) show
+        // it as a generic "XInput Controller #N" — NOT "Xbox 360 Controller".
         let nobd_pad_name = match self.pad_type {
-            PadType::Xbox360 => "Xbox 360 Controller",
+            PadType::Xbox360 => "XInput Controller",
             PadType::DualShock4 => "Wireless Controller",
         };
 
