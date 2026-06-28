@@ -27,6 +27,11 @@ pub const ERR_NONE: u8 = 0;
 pub const ERR_NO_XINPUT: u8 = 1;
 pub const ERR_NO_VIGEM: u8 = 2;
 
+/// Is the ViGEmBus driver installed + reachable? (Cheap connect probe.)
+pub fn vigem_present() -> bool {
+    vigem_client::Client::connect().is_ok()
+}
+
 /// Which identity the virtual pad presents as. DualShock4 shows distinctly in
 /// Steam ("Wireless Controller"), so it's tell-apart-able from a real Xbox stick;
 /// Xbox360 is XInput-native (needed for raw-XInput games outside Steam).

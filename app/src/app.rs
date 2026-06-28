@@ -100,6 +100,8 @@ pub struct FingerGapApp {
     sync_service: crate::sync_service::SyncService,
     /// Virtual-pad identity (Xbox 360 vs DualShock 4).
     pad_type: PadType,
+    /// Was the ViGEmBus driver present at launch? (Drives the install button.)
+    vigem_installed: bool,
 }
 
 impl FingerGapApp {
@@ -149,6 +151,7 @@ impl FingerGapApp {
             selected_hid_label,
             sync_service: crate::sync_service::SyncService::start(pad_type),
             pad_type,
+            vigem_installed: crate::sync_service::vigem_present(),
         }
     }
 
@@ -487,7 +490,7 @@ impl eframe::App for FingerGapApp {
         });
 
         match self.active_tab {
-            Tab::NobdSync => draw_nobd_sync(ctx, &self.sync_service, self.pad_type),
+            Tab::NobdSync => draw_nobd_sync(ctx, &self.sync_service, self.pad_type, self.vigem_installed),
             Tab::GapTester => self.draw_gap_tester(ctx),
             Tab::ButtonMonitor => self.draw_button_monitor(ctx),
         }
@@ -506,7 +509,12 @@ impl eframe::App for FingerGapApp {
 
 // ─── SYSTEM-WIDE SYNC TAB (drives the in-GUI SyncService → virtual NOBD pad) ───
 
-fn draw_nobd_sync(ctx: &egui::Context, sync: &crate::sync_service::SyncService, pad: PadType) {
+fn draw_nobd_sync(
+    ctx: &egui::Context,
+    sync: &crate::sync_service::SyncService,
+    pad: PadType,
+    vigem_installed: bool,
+) {
     use std::sync::atomic::Ordering;
     let s = nobd_shared::state();
     let steam_name = match pad {
@@ -553,9 +561,19 @@ fn draw_nobd_sync(ctx: &egui::Context, sync: &crate::sync_service::SyncService, 
         // ── Setup: the one dependency + how to wire it into a game ──
         ui.label(RichText::new("Setup").strong().size(15.0));
         ui.horizontal(|ui| {
-            ui.label("1.  Install");
-            ui.hyperlink_to("ViGEmBus", "https://github.com/nefarius/ViGEmBus/releases/latest");
-            ui.label(RichText::new("(one-time, free — run the installer, then restart NOBD). Lets NOBD create the virtual pad.").size(13.0));
+            if vigem_installed {
+                ui.colored_label(GREEN, "1.  \u{2713} ViGEmBus driver installed");
+            } else {
+                ui.label("1.");
+                if ui.button("Install ViGEmBus").clicked() {
+                    install_vigembus();
+                }
+                ui.label(
+                    RichText::new("(one-time, free — approve the UAC prompt, then restart NOBD)")
+                        .size(12.0)
+                        .color(Color32::GRAY),
+                );
+            }
         });
         ui.label("2.  Connect your controller (XInput). NOBD plugs in the virtual NOBD pad automatically — the banner above turns green.");
         ui.label("3.  Turn on \"NOBD sync window\" below and set your window (find your number on the Finger Gap Tester tab).");
@@ -1156,4 +1174,34 @@ fn banner(
             });
         });
     ui.add_space(6.0);
+}
+
+/// Find a bundled ViGEmBus installer (any *vigembus*.exe) sitting next to nobd.exe.
+fn vigembus_installer_path() -> Option<std::path::PathBuf> {
+    let dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
+    std::fs::read_dir(&dir)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| {
+            p.extension().map_or(false, |e| e.eq_ignore_ascii_case("exe"))
+                && p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map_or(false, |n| n.to_lowercase().contains("vigembus"))
+        })
+}
+
+/// Launch the bundled ViGEmBus installer (UAC prompts for the driver install), or
+/// open the download page if no installer is bundled next to nobd.exe.
+fn install_vigembus() {
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    let wide = |s: &str| s.encode_utf16().chain(std::iter::once(0)).collect::<Vec<u16>>();
+    let verb = wide("open");
+    let target = vigembus_installer_path()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "https://github.com/nefarius/ViGEmBus/releases/latest".to_owned());
+    let file = wide(&target);
+    unsafe {
+        ShellExecuteW(0, verb.as_ptr(), file.as_ptr(), std::ptr::null(), std::ptr::null(), 1 /* SW_SHOWNORMAL */);
+    }
 }
