@@ -184,6 +184,9 @@ pub struct FingerGapApp {
     selected_hid: Option<HidDeviceId>,
     /// Cached display label for the active HID device (for the source note).
     selected_hid_label: String,
+    /// System-wide sync (read real pad → group → virtual pad). Runs by default;
+    /// dropping it unplugs the virtual pad.
+    sync_service: crate::sync_service::SyncService,
 }
 
 impl FingerGapApp {
@@ -235,6 +238,7 @@ impl FingerGapApp {
             hid_devices,
             selected_hid,
             selected_hid_label,
+            sync_service: crate::sync_service::SyncService::start(),
         }
     }
 

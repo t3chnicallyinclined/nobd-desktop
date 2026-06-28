@@ -9,6 +9,7 @@ mod logo;
 mod monitor;
 mod persist;
 mod stats;
+mod sync_service;
 mod tray;
 
 use egui::Color32;
