@@ -791,6 +791,11 @@ fn draw_gap_tester(&self, ctx: &egui::Context) {
         let real_slot = self.sync_service.real_slot();
         let sync_active = self.sync_service.is_active();
         let is_xinput = self.source_kind == SourceKind::XInput;
+        // The synced pad's actual device name (what it shows as in a game).
+        let nobd_pad_name = match self.pad_type {
+            PadType::Xbox360 => "Xbox 360 Controller",
+            PadType::DualShock4 => "Wireless Controller",
+        };
 
         ui.add_space(4.0);
         ui.label(
@@ -826,9 +831,9 @@ fn draw_gap_tester(&self, ctx: &egui::Context) {
                     .show(ui, |ui| {
                         ui.label(
                             RichText::new(format!(
-                                "\u{25C9} System-wide sync is ON \u{2014} column C{} below is the NOBD VIRTUAL PAD. \
-                                 Select THAT controller in your game; the other column is your real stick.",
-                                vs + 1
+                                "\u{25C9} System-wide sync is ON \u{2014} column C{} is the \"{}\" that NOBD created \
+                                 (your synced pad). Select THAT controller in your game; the other column is your real stick.",
+                                vs + 1, nobd_pad_name
                             ))
                             .size(12.0)
                             .color(TEAL),
@@ -860,8 +865,8 @@ fn draw_gap_tester(&self, ctx: &egui::Context) {
         let stats: &GapStats = self.stats.get(*cidx).unwrap_or(&empty);
         let slot = *cidx as u32;
         if is_xinput && nobd_slot == Some(slot) {
-            ui.label(RichText::new(format!("\u{25C9} C{}: NOBD VIRTUAL PAD", cidx + 1)).strong().size(14.0).color(TEAL));
-            ui.label(RichText::new("\u{2190} select this one in your game").size(11.0).color(TEAL));
+            ui.label(RichText::new(format!("\u{25C9} C{}: {nobd_pad_name} (NOBD)", cidx + 1)).strong().size(14.0).color(TEAL));
+            ui.label(RichText::new("\u{2190} your synced pad \u{2014} select this in your game").size(11.0).color(TEAL));
         } else if is_xinput && real_slot == Some(slot) {
             ui.label(RichText::new(format!("C{}: {cname}  (your real stick)", cidx + 1)).strong().size(14.0).color(Color32::GRAY));
         } else {
