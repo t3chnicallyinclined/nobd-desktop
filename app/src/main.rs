@@ -2,6 +2,7 @@
 #![windows_subsystem = "windows"]
 
 mod app;
+mod hid;
 mod input;
 mod install;
 mod logo;

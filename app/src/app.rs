@@ -1,9 +1,17 @@
 use eframe::egui;
 use egui::{Color32, RichText, ScrollArea, Ui};
 
-use crate::input::{format_button, GamepadInput, InputEvent};
+use crate::hid::{list_hid_gamepads, HidDeviceId, HidDeviceInfo};
+use crate::input::{format_button, GamepadInput, InputEvent, InputSourceKind};
 use crate::monitor::ButtonMonitor;
 use crate::stats::GapStats;
+
+/// Which input backend the Finger Gap Tester reads from.
+#[derive(PartialEq, Clone, Copy)]
+enum SourceKind {
+    XInput,
+    Hid,
+}
 
 const TEAL: Color32 = Color32::from_rgb(0, 180, 216);
 const GREEN: Color32 = Color32::from_rgb(80, 200, 80);
@@ -168,13 +176,40 @@ pub struct FingerGapApp {
     last_cfg: crate::persist::Cfg,
     /// Sliding-window size (recent chords) the grouping verdict is judged over.
     decision_window: usize,
+    /// Input source for the Finger Gap Tester (XInput vs raw HID).
+    source_kind: SourceKind,
+    /// Cached HID gamepad list for the device picker.
+    hid_devices: Vec<HidDeviceInfo>,
+    /// Selected HID device (when source_kind == Hid).
+    selected_hid: Option<HidDeviceId>,
+    /// Cached display label for the active HID device (for the source note).
+    selected_hid_label: String,
 }
 
 impl FingerGapApp {
     pub fn new(ctx: &egui::Context) -> Self {
         // Restore saved settings into shared memory before anything reads it.
         let last_cfg = crate::persist::load();
-        let (input, error_msg) = match GamepadInput::new() {
+        let ui_cfg = crate::persist::load_ui();
+        let hid_devices = list_hid_gamepads();
+
+        // Resolve the desired input source, falling back to XInput if a saved HID
+        // device is no longer present.
+        let (source_kind, selected_hid, selected_hid_label, source) = if ui_cfg.input_source == 1 {
+            match hid_devices.iter().find(|d| d.id.path == ui_cfg.hid_device) {
+                Some(d) => (
+                    SourceKind::Hid,
+                    Some(d.id()),
+                    d.product.clone(),
+                    InputSourceKind::Hid(d.id()),
+                ),
+                None => (SourceKind::XInput, None, String::new(), InputSourceKind::XInput),
+            }
+        } else {
+            (SourceKind::XInput, None, String::new(), InputSourceKind::XInput)
+        };
+
+        let (input, error_msg) = match GamepadInput::new(source) {
             Ok(gi) => (Some(gi), None),
             Err(e) => (None, Some(format!("Gamepad init failed: {e}"))),
         };
@@ -196,7 +231,55 @@ impl FingerGapApp {
             install_msg: String::new(),
             last_cfg,
             decision_window: crate::stats::DEFAULT_WINDOW,
+            source_kind,
+            hid_devices,
+            selected_hid,
+            selected_hid_label,
         }
+    }
+
+    /// Clear local gap-tester state (stats/counts/log/monitor) — reused by the
+    /// Reset button and by an input-source switch.
+    fn reset_local_stats(&mut self) {
+        self.stats.clear();
+        self.stray_counts.clear();
+        self.bounce_counts.clear();
+        self.total_pairs.clear();
+        self.gap_log.clear();
+        self.monitor.clear();
+    }
+
+    /// Drop the current input backend and start a new one on `source`. Dropping
+    /// the old `GamepadInput` ends its background thread (its channel sender
+    /// errors on the next send). Local stats are cleared since per-source button
+    /// identity / slots differ.
+    fn rebuild_input(&mut self, source: InputSourceKind) {
+        match GamepadInput::new(source) {
+            Ok(gi) => {
+                self.input = Some(gi);
+                self.error_msg = None;
+            }
+            Err(e) => {
+                self.input = None;
+                self.error_msg = Some(format!("Gamepad init failed: {e}"));
+            }
+        }
+        self.reset_local_stats();
+    }
+
+    /// Persist the current input-source choice (separate from shared-mem Cfg).
+    fn persist_ui(&self) {
+        crate::persist::save_ui(&crate::persist::UiCfg {
+            input_source: match self.source_kind {
+                SourceKind::XInput => 0,
+                SourceKind::Hid => 1,
+            },
+            hid_device: self
+                .selected_hid
+                .as_ref()
+                .map(|id| id.to_persist())
+                .unwrap_or_default(),
+        });
     }
 }
 
@@ -500,6 +583,86 @@ impl eframe::App for FingerGapApp {
             // N chords, so it re-decides live and flips when you toggle NOBD
             // mid-session (no Reset needed). Only relevant on the Gap Tester tab.
             if self.active_tab == Tab::GapTester {
+                // Input source selector (XInput vs raw HID + device picker). Work
+                // on LOCAL copies inside the egui closures, then write back +
+                // apply after — avoids nested mutable borrows of `self`.
+                let mut kind = self.source_kind;
+                let mut selected = self.selected_hid.clone();
+                let mut label = self.selected_hid_label.clone();
+                let devices = self.hid_devices.clone();
+                let mut do_refresh = false;
+                let mut pending_source: Option<InputSourceKind> = None;
+
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Input source").size(12.0).color(Color32::GRAY));
+                    egui::ComboBox::from_id_salt("input_source")
+                        .selected_text(match kind {
+                            SourceKind::XInput => "XInput",
+                            SourceKind::Hid => "Raw HID",
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut kind, SourceKind::XInput, "XInput");
+                            ui.selectable_value(&mut kind, SourceKind::Hid, "Raw HID");
+                        });
+
+                    if kind == SourceKind::Hid {
+                        let sel_text = if label.is_empty() {
+                            "Select device…".to_owned()
+                        } else {
+                            label.clone()
+                        };
+                        egui::ComboBox::from_id_salt("hid_device")
+                            .selected_text(sel_text)
+                            .show_ui(ui, |ui| {
+                                if devices.is_empty() {
+                                    ui.label(
+                                        RichText::new("No HID gamepads — Xbox pads aren't usable here; use a DInput stick")
+                                            .size(11.0)
+                                            .color(Color32::GRAY),
+                                    );
+                                }
+                                for d in &devices {
+                                    let chosen = selected.as_ref() == Some(&d.id);
+                                    let l = format!("{} ({:04x}:{:04x})", d.product, d.id.vid, d.id.pid);
+                                    if ui.selectable_label(chosen, l).clicked() {
+                                        selected = Some(d.id());
+                                        label = d.product.clone();
+                                        pending_source = Some(InputSourceKind::Hid(d.id()));
+                                    }
+                                }
+                            });
+                        if ui.button("Refresh").clicked() {
+                            do_refresh = true;
+                        }
+                    }
+                });
+
+                // Detect a source-kind change.
+                if kind != self.source_kind {
+                    self.source_kind = kind;
+                    match kind {
+                        SourceKind::XInput => pending_source = Some(InputSourceKind::XInput),
+                        SourceKind::Hid => do_refresh = true, // refresh + auto-pick below
+                    }
+                }
+                self.selected_hid = selected;
+                self.selected_hid_label = label;
+
+                if do_refresh {
+                    self.hid_devices = list_hid_gamepads();
+                    if self.source_kind == SourceKind::Hid && self.selected_hid.is_none() {
+                        if let Some(d) = self.hid_devices.first() {
+                            self.selected_hid = Some(d.id());
+                            self.selected_hid_label = d.product.clone();
+                            pending_source = Some(InputSourceKind::Hid(d.id()));
+                        }
+                    }
+                }
+                if let Some(src) = pending_source {
+                    self.rebuild_input(src);
+                    self.persist_ui();
+                }
+
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("Decision window").size(12.0).color(Color32::GRAY));
                     ui.add(
@@ -840,6 +1003,19 @@ fn draw_gap_tester(&self, ctx: &egui::Context) {
             .size(11.0)
             .color(Color32::GRAY),
         );
+        // Which input path is live — the whole point during filter verification.
+        let (source_line, source_color) = match self.source_kind {
+            SourceKind::XInput => ("Source: XInput".to_owned(), Color32::GRAY),
+            SourceKind::Hid => {
+                let label = if self.selected_hid_label.is_empty() {
+                    "(no device)".to_owned()
+                } else {
+                    self.selected_hid_label.clone()
+                };
+                (format!("Source: Raw HID — {label}"), TEAL)
+            }
+        };
+        ui.label(RichText::new(source_line).size(11.0).color(source_color));
         ui.separator();
         if controllers.is_empty() {
             ui.add_space(20.0);

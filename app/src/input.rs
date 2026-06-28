@@ -18,11 +18,20 @@
 
 use gilrs::Button;
 use std::collections::HashMap;
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::OnceLock;
 use std::thread;
 use std::time::{Duration, Instant};
 use windows_sys::Win32::Media::timeBeginPeriod;
+
+/// Which backend feeds the input pipeline. Both emit the SAME `InputMsg` stream,
+/// so everything downstream (poll/cluster/stats/verdict) is source-agnostic.
+pub enum InputSourceKind {
+    /// XInput / Xbox pads (up to 4 slots) — the default.
+    XInput,
+    /// One raw HID gamepad (DInput-mode stick) read directly, on slot 0.
+    Hid(crate::hid::HidDeviceId),
+}
 
 /// Fixed session epoch for the free-running game-poll simulation. Anchored once,
 /// the first time it's read — NEVER reset on input, so presses fall at random
@@ -149,7 +158,7 @@ pub enum InputEvent {
     Released(Button),
 }
 
-enum InputMsg {
+pub(crate) enum InputMsg {
     Pressed(usize, Button, Instant),
     Released(usize, Button, Instant),
     /// Connected slots (index + name) plus the measured min report interval (ms;
@@ -284,10 +293,30 @@ pub struct GamepadInput {
 }
 
 impl GamepadInput {
-    pub fn new() -> Result<Self, String> {
+    pub fn new(source: InputSourceKind) -> Result<Self, String> {
         let (tx, rx) = mpsc::channel();
 
-        thread::spawn(move || {
+        match source {
+            InputSourceKind::XInput => {
+                thread::spawn(move || Self::xinput_loop(tx));
+            }
+            InputSourceKind::Hid(id) => {
+                thread::spawn(move || crate::hid::run_reader(id, tx));
+            }
+        }
+
+        Ok(Self {
+            rx,
+            pads: Vec::new(),
+            names: Vec::new(),
+            connected: Vec::new(),
+            report_interval_ms: 0.0,
+        })
+    }
+
+    /// The XInput polling loop (runs on the background thread). Emits the SAME
+    /// `InputMsg` stream as the HID reader, so the pipeline is source-agnostic.
+    fn xinput_loop(tx: Sender<InputMsg>) {
             // Resolve XInput from System32 by absolute path. If it can't load,
             // the thread exits quietly — the app keeps running, just no input.
             let xinput_get_state = match load_xinput_get_state() {
@@ -400,15 +429,6 @@ impl GamepadInput {
 
                 thread::sleep(POLL_INTERVAL);
             }
-        });
-
-        Ok(Self {
-            rx,
-            pads: Vec::new(),
-            names: Vec::new(),
-            connected: Vec::new(),
-            report_interval_ms: 0.0,
-        })
     }
 
     /// Ensure per-slot state exists up to (and including) `slot`.

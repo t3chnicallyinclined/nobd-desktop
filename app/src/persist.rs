@@ -24,6 +24,58 @@ fn config_path() -> Option<PathBuf> {
     Some(dir.join("config.txt"))
 }
 
+fn ui_config_path() -> Option<PathBuf> {
+    let base = std::env::var("APPDATA").ok()?;
+    let dir = PathBuf::from(base).join("nobd-desktop");
+    let _ = std::fs::create_dir_all(&dir);
+    Some(dir.join("ui.txt"))
+}
+
+/// UI-only settings — the Finger Gap Tester input source. Kept in its OWN file,
+/// completely separate from the shared-memory `Cfg` flow (which is re-derived
+/// from shared memory every frame and has no field for a UI source choice).
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct UiCfg {
+    /// 0 = XInput, 1 = raw HID.
+    pub input_source: u32,
+    /// HID device interface path when `input_source == 1`; empty otherwise.
+    pub hid_device: String,
+}
+
+/// Load the UI-only settings (input source + HID device).
+pub fn load_ui() -> UiCfg {
+    let mut ui = UiCfg::default();
+    if let Some(path) = ui_config_path() {
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            for line in text.lines() {
+                let mut it = line.splitn(2, '=');
+                let k = it.next().unwrap_or("").trim();
+                let Some(v) = it.next() else { continue };
+                let v = v.trim();
+                match k {
+                    "input_source" => ui.input_source = v.parse::<u32>().unwrap_or(0).min(1),
+                    "hid_device" => ui.hid_device = v.to_string(),
+                    _ => {}
+                }
+            }
+        }
+    }
+    ui
+}
+
+/// Persist the UI-only settings.
+pub fn save_ui(ui: &UiCfg) {
+    if let Some(path) = ui_config_path() {
+        let body = format!(
+            "input_source={}\nhid_device={}\n",
+            ui.input_source, ui.hid_device,
+        );
+        if let Ok(mut f) = std::fs::File::create(&path) {
+            let _ = f.write_all(body.as_bytes());
+        }
+    }
+}
+
 /// Snapshot the current config out of shared memory.
 pub fn current() -> Cfg {
     let s = state();
