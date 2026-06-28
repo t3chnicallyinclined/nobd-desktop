@@ -550,6 +550,20 @@ fn draw_nobd_sync(ctx: &egui::Context, sync: &crate::sync_service::SyncService, 
         }
         ui.separator();
 
+        // ── Setup: the one dependency + how to wire it into a game ──
+        ui.label(RichText::new("Setup").strong().size(15.0));
+        ui.horizontal(|ui| {
+            ui.label("1.  Install");
+            ui.hyperlink_to("ViGEmBus", "https://github.com/nefarius/ViGEmBus/releases/latest");
+            ui.label(RichText::new("(one-time, free — run the installer, then restart NOBD). Lets NOBD create the virtual pad.").size(13.0));
+        });
+        ui.label("2.  Connect your controller (XInput). NOBD plugs in the virtual NOBD pad automatically — the banner above turns green.");
+        ui.label("3.  Turn on \"NOBD sync window\" below and set your window (find your number on the Finger Gap Tester tab).");
+        ui.label(format!(
+            "4.  In your game/emulator's controller settings, select the virtual \"{steam_name}\" \u{2014} your real stick drives it underneath, grouped."
+        ));
+        ui.separator();
+
         // ── Master control ──
         let mut enabled = s.enabled.load(Ordering::Relaxed) != 0;
         if ui.checkbox(&mut enabled, RichText::new("NOBD sync window").size(16.0)).changed() {
@@ -575,25 +589,22 @@ fn draw_nobd_sync(ctx: &egui::Context, sync: &crate::sync_service::SyncService, 
             .corner_radius(8.0)
             .stroke(egui::Stroke::new(2.0, TEAL))
             .show(ui, |ui| {
-                ui.label(RichText::new("How to use it in a game").strong().color(TEAL));
-                ui.label(format!(
-                    "NOBD presents a virtual pad with your near-simultaneous presses grouped onto the \
-                     same frame. In your game or emulator's controller settings, SELECT the virtual \
-                     \"{steam_name}\" as your pad \u{2014} the game then reads only the synced pad, while \
-                     your real stick quietly drives it underneath. Works in every game that lets you \
-                     pick a controller (most emulators + fighting games)."
-                ));
+                ui.label(RichText::new("Tips").strong().color(TEAL));
+                ui.label(
+                    "\u{2022}  Two identical \"Xbox 360 Controller\" entries in the list? Your real stick is \
+                     Xbox too. Set \"Virtual pad\" (top bar) to DualShock 4 \u{2014} the NOBD pad then shows \
+                     as a separate \"Wireless Controller\" so you can pick the right one.",
+                );
                 ui.add_space(2.0);
                 ui.label(
-                    RichText::new(
-                        "Tip: if your real stick is also an Xbox pad, set \"Virtual pad\" (top bar) to \
-                         DualShock 4 \u{2014} Steam then lists it as a separate \"Wireless Controller\" so \
-                         you can tell them apart. If a game grabs every controller at once and you get \
-                         doubled inputs, it needs the real pad hidden (HidHide) \u{2014} optional, and a \
-                         non-issue on native-HID NOBD hardware.",
-                    )
-                    .size(11.0)
-                    .color(Color32::GRAY),
+                    "\u{2022}  DualShock 4 mode works in Steam, emulators, and DInput games. Use Xbox 360 mode \
+                     for raw-XInput-only games launched outside Steam.",
+                );
+                ui.add_space(2.0);
+                ui.label(
+                    "\u{2022}  If a game grabs every controller at once and you get doubled inputs, it needs \
+                     the real pad hidden (HidHide) \u{2014} an optional advanced step, and a non-issue on \
+                     native-HID NOBD hardware.",
                 );
             });
 
@@ -762,9 +773,9 @@ fn draw_gap_tester(&self, ctx: &egui::Context) {
         ui.add_space(4.0);
         ui.label(
             RichText::new(
-                "Reads your controller directly \u{2014} this shows the controller's own input behavior \
-                 (e.g. firmware-level grouping). It does NOT reflect this app's in-game NOBD sync, \
-                 which conditions MvC2's inputs separately.",
+                "Reads your controller directly. With System-wide sync running you'll see TWO pads here \
+                 \u{2014} your real stick AND the virtual NOBD pad: the NOBD pad reads GROUPING DETECTED, the \
+                 real one your raw finger timing. That side-by-side is the proof the sync works.",
             )
             .size(11.0)
             .color(Color32::GRAY),
