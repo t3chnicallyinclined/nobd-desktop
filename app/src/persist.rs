@@ -40,6 +40,8 @@ pub struct UiCfg {
     pub input_source: u32,
     /// HID device interface path when `input_source == 1`; empty otherwise.
     pub hid_device: String,
+    /// Virtual-pad identity: 0 = Xbox 360, 1 = DualShock 4.
+    pub pad_type: u32,
 }
 
 /// Load the UI-only settings (input source + HID device).
@@ -55,6 +57,7 @@ pub fn load_ui() -> UiCfg {
                 match k {
                     "input_source" => ui.input_source = v.parse::<u32>().unwrap_or(0).min(1),
                     "hid_device" => ui.hid_device = v.to_string(),
+                    "pad_type" => ui.pad_type = v.parse::<u32>().unwrap_or(0).min(1),
                     _ => {}
                 }
             }
@@ -67,8 +70,8 @@ pub fn load_ui() -> UiCfg {
 pub fn save_ui(ui: &UiCfg) {
     if let Some(path) = ui_config_path() {
         let body = format!(
-            "input_source={}\nhid_device={}\n",
-            ui.input_source, ui.hid_device,
+            "input_source={}\nhid_device={}\npad_type={}\n",
+            ui.input_source, ui.hid_device, ui.pad_type,
         );
         if let Ok(mut f) = std::fs::File::create(&path) {
             let _ = f.write_all(body.as_bytes());

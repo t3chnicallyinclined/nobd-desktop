@@ -27,6 +27,79 @@ pub const ERR_NONE: u8 = 0;
 pub const ERR_NO_XINPUT: u8 = 1;
 pub const ERR_NO_VIGEM: u8 = 2;
 
+/// Which identity the virtual pad presents as. DualShock4 shows distinctly in
+/// Steam ("Wireless Controller"), so it's tell-apart-able from a real Xbox stick;
+/// Xbox360 is XInput-native (needed for raw-XInput games outside Steam).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum PadType {
+    Xbox360,
+    DualShock4,
+}
+
+impl PadType {
+    pub fn from_u32(n: u32) -> Self {
+        if n == 1 { PadType::DualShock4 } else { PadType::Xbox360 }
+    }
+    pub fn as_u32(self) -> u32 {
+        match self {
+            PadType::Xbox360 => 0,
+            PadType::DualShock4 => 1,
+        }
+    }
+}
+
+/// Either virtual-pad target, so the loop can drive whichever was plugged.
+enum Target {
+    X(vigem_client::Xbox360Wired<vigem_client::Client>),
+    D(vigem_client::DualShock4Wired<vigem_client::Client>),
+}
+
+/// Translate a grouped XInput button mask (+ analog) into a DS4 HID report.
+/// DS4 buttons: low nibble = dpad hat (8 = neutral), then Square/Cross/Circle/
+/// Triangle, L1/R1, L2/R2, Share/Options, L3/R3.
+fn xbox_to_ds4(buttons: u16, lt: u8, rt: u8, lx: i16, ly: i16, rx: i16, ry: i16) -> vigem_client::DS4Report {
+    let up = buttons & 0x0001 != 0;
+    let down = buttons & 0x0002 != 0;
+    let left = buttons & 0x0004 != 0;
+    let right = buttons & 0x0008 != 0;
+    let hat: u16 = match (up, down, left, right) {
+        (true, false, false, false) => 0,
+        (true, false, false, true) => 1,
+        (false, false, false, true) => 2,
+        (false, true, false, true) => 3,
+        (false, true, false, false) => 4,
+        (false, true, true, false) => 5,
+        (false, false, true, false) => 6,
+        (true, false, true, false) => 7,
+        _ => 8, // neutral
+    };
+    let mut b: u16 = hat;
+    if buttons & 0x4000 != 0 { b |= 0x10; }   // X  -> Square
+    if buttons & 0x1000 != 0 { b |= 0x20; }   // A  -> Cross
+    if buttons & 0x2000 != 0 { b |= 0x40; }   // B  -> Circle
+    if buttons & 0x8000 != 0 { b |= 0x80; }   // Y  -> Triangle
+    if buttons & 0x0100 != 0 { b |= 0x100; }  // LB -> L1
+    if buttons & 0x0200 != 0 { b |= 0x200; }  // RB -> R1
+    if lt > 30 { b |= 0x400; }                // LT -> L2
+    if rt > 30 { b |= 0x800; }                // RT -> R2
+    if buttons & 0x0020 != 0 { b |= 0x1000; } // Back  -> Share
+    if buttons & 0x0010 != 0 { b |= 0x2000; } // Start -> Options
+    if buttons & 0x0040 != 0 { b |= 0x4000; } // LS -> L3
+    if buttons & 0x0080 != 0 { b |= 0x8000; } // RS -> R3
+
+    let axis = |v: i16| (((v as i32) + 32768) >> 8) as u8;
+    vigem_client::DS4Report {
+        thumb_lx: axis(lx),
+        thumb_ly: 255u8.wrapping_sub(axis(ly)), // DS4 Y is inverted vs XInput
+        thumb_rx: axis(rx),
+        thumb_ry: 255u8.wrapping_sub(axis(ry)),
+        buttons: b,
+        special: 0,
+        trigger_l: lt,
+        trigger_r: rt,
+    }
+}
+
 type XInputGetStateFn = unsafe extern "system" fn(u32, *mut XINPUT_STATE) -> u32;
 
 /// Resolve XInputGetState from System32 (the static windows-sys symbol hangs on
@@ -89,13 +162,13 @@ pub struct SyncService {
 }
 
 impl SyncService {
-    pub fn start() -> Self {
+    pub fn start(pad: PadType) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let status = Arc::new(SyncStatus::new());
         let handle = {
             let stop = stop.clone();
             let status = status.clone();
-            std::thread::spawn(move || run(stop, status))
+            std::thread::spawn(move || run(stop, status, pad))
         };
         Self { stop, status, handle: Some(handle) }
     }
@@ -131,7 +204,7 @@ impl Drop for SyncService {
     }
 }
 
-fn run(stop: Arc<AtomicBool>, status: Arc<SyncStatus>) {
+fn run(stop: Arc<AtomicBool>, status: Arc<SyncStatus>, pad: PadType) {
     let xi = match load_xinput() {
         Some(f) => f,
         None => {
@@ -162,13 +235,26 @@ fn run(stop: Arc<AtomicBool>, status: Arc<SyncStatus>) {
             return;
         }
     };
-    let mut target =
-        vigem_client::Xbox360Wired::new(client, vigem_client::TargetId::XBOX360_WIRED);
-    if target.plugin().is_err() {
-        status.error.store(ERR_NO_VIGEM, Ordering::Relaxed);
-        return;
-    }
-    let _ = target.wait_ready();
+    let mut target = match pad {
+        PadType::Xbox360 => {
+            let mut t = vigem_client::Xbox360Wired::new(client, vigem_client::TargetId::XBOX360_WIRED);
+            if t.plugin().is_err() {
+                status.error.store(ERR_NO_VIGEM, Ordering::Relaxed);
+                return;
+            }
+            let _ = t.wait_ready();
+            Target::X(t)
+        }
+        PadType::DualShock4 => {
+            let mut t = vigem_client::DualShock4Wired::new(client, vigem_client::TargetId::DUALSHOCK4_WIRED);
+            if t.plugin().is_err() {
+                status.error.store(ERR_NO_VIGEM, Ordering::Relaxed);
+                return;
+            }
+            let _ = t.wait_ready();
+            Target::D(t)
+        }
+    };
 
     unsafe { timeBeginPeriod(1) };
     status.active.store(true, Ordering::Relaxed);
@@ -188,16 +274,27 @@ fn run(stop: Arc<AtomicBool>, status: Arc<SyncStatus>) {
             let gp = state.Gamepad;
             let grouped =
                 sync.process(gp.wButtons, ATTACK_MASK, ATTACK_MASK, now_us, window_us, enabled);
-            let out = vigem_client::XGamepad {
-                buttons: vigem_client::XButtons { raw: grouped },
-                left_trigger: gp.bLeftTrigger,
-                right_trigger: gp.bRightTrigger,
-                thumb_lx: gp.sThumbLX,
-                thumb_ly: gp.sThumbLY,
-                thumb_rx: gp.sThumbRX,
-                thumb_ry: gp.sThumbRY,
-            };
-            let _ = target.update(&out);
+            match &mut target {
+                Target::X(t) => {
+                    let out = vigem_client::XGamepad {
+                        buttons: vigem_client::XButtons { raw: grouped },
+                        left_trigger: gp.bLeftTrigger,
+                        right_trigger: gp.bRightTrigger,
+                        thumb_lx: gp.sThumbLX,
+                        thumb_ly: gp.sThumbLY,
+                        thumb_rx: gp.sThumbRX,
+                        thumb_ry: gp.sThumbRY,
+                    };
+                    let _ = t.update(&out);
+                }
+                Target::D(t) => {
+                    let r = xbox_to_ds4(
+                        grouped, gp.bLeftTrigger, gp.bRightTrigger,
+                        gp.sThumbLX, gp.sThumbLY, gp.sThumbRX, gp.sThumbRY,
+                    );
+                    let _ = t.update(&r);
+                }
+            }
         } else {
             status.real_present.store(false, Ordering::Relaxed);
         }

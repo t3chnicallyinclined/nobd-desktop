@@ -5,6 +5,7 @@ use crate::hid::{list_hid_gamepads, HidDeviceId, HidDeviceInfo};
 use crate::input::{format_button, GamepadInput, InputEvent, InputSourceKind};
 use crate::monitor::ButtonMonitor;
 use crate::stats::GapStats;
+use crate::sync_service::PadType;
 
 /// Which input backend the Finger Gap Tester reads from.
 #[derive(PartialEq, Clone, Copy)]
@@ -97,6 +98,8 @@ pub struct FingerGapApp {
     /// System-wide sync (read real pad → group → virtual pad). Runs by default;
     /// dropping it unplugs the virtual pad.
     sync_service: crate::sync_service::SyncService,
+    /// Virtual-pad identity (Xbox 360 vs DualShock 4).
+    pad_type: PadType,
 }
 
 impl FingerGapApp {
@@ -105,6 +108,7 @@ impl FingerGapApp {
         let last_cfg = crate::persist::load();
         let ui_cfg = crate::persist::load_ui();
         let hid_devices = list_hid_gamepads();
+        let pad_type = PadType::from_u32(ui_cfg.pad_type);
 
         // Resolve the desired input source, falling back to XInput if a saved HID
         // device is no longer present.
@@ -143,7 +147,8 @@ impl FingerGapApp {
             hid_devices,
             selected_hid,
             selected_hid_label,
-            sync_service: crate::sync_service::SyncService::start(),
+            sync_service: crate::sync_service::SyncService::start(pad_type),
+            pad_type,
         }
     }
 
@@ -188,6 +193,7 @@ impl FingerGapApp {
                 .as_ref()
                 .map(|id| id.to_persist())
                 .unwrap_or_default(),
+            pad_type: self.pad_type.as_u32(),
         });
     }
 }
@@ -453,10 +459,35 @@ impl eframe::App for FingerGapApp {
                     .on_hover_text("How many recent chords the ON/OFF verdict is based on. Lower = flips faster when you toggle NOBD; higher = steadier.");
                 });
             }
+
+            // Virtual-pad identity picker (System-wide sync tab only). DualShock 4
+            // shows distinctly in Steam so it's tell-apart-able from a real Xbox stick.
+            if self.active_tab == Tab::NobdSync {
+                let mut pt = self.pad_type;
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Virtual pad").size(12.0).color(Color32::GRAY));
+                    egui::ComboBox::from_id_salt("pad_type")
+                        .selected_text(match pt {
+                            PadType::Xbox360 => "Xbox 360",
+                            PadType::DualShock4 => "DualShock 4",
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut pt, PadType::Xbox360, "Xbox 360 (XInput-native)");
+                            ui.selectable_value(&mut pt, PadType::DualShock4, "DualShock 4 (distinct from a real Xbox stick)");
+                        });
+                })
+                .response
+                .on_hover_text("Pick DualShock 4 if your real stick is an Xbox pad — Steam shows it as a separate \"Wireless Controller\" so you can select the right one. Xbox 360 is needed for raw-XInput games outside Steam.");
+                if pt != self.pad_type {
+                    self.pad_type = pt;
+                    self.sync_service = crate::sync_service::SyncService::start(pt);
+                    self.persist_ui();
+                }
+            }
         });
 
         match self.active_tab {
-            Tab::NobdSync => draw_nobd_sync(ctx, &self.sync_service),
+            Tab::NobdSync => draw_nobd_sync(ctx, &self.sync_service, self.pad_type),
             Tab::GapTester => self.draw_gap_tester(ctx),
             Tab::ButtonMonitor => self.draw_button_monitor(ctx),
         }
@@ -475,9 +506,13 @@ impl eframe::App for FingerGapApp {
 
 // ─── SYSTEM-WIDE SYNC TAB (drives the in-GUI SyncService → virtual NOBD pad) ───
 
-fn draw_nobd_sync(ctx: &egui::Context, sync: &crate::sync_service::SyncService) {
+fn draw_nobd_sync(ctx: &egui::Context, sync: &crate::sync_service::SyncService, pad: PadType) {
     use std::sync::atomic::Ordering;
     let s = nobd_shared::state();
+    let steam_name = match pad {
+        PadType::Xbox360 => "Xbox 360 Controller",
+        PadType::DualShock4 => "Wireless Controller (DualShock 4)",
+    };
 
     egui::CentralPanel::default().show(ctx, |ui| {
         ui.heading("System-wide sync");
@@ -541,18 +576,20 @@ fn draw_nobd_sync(ctx: &egui::Context, sync: &crate::sync_service::SyncService) 
             .stroke(egui::Stroke::new(2.0, TEAL))
             .show(ui, |ui| {
                 ui.label(RichText::new("How to use it in a game").strong().color(TEAL));
-                ui.label(
-                    "NOBD presents a virtual Xbox 360 pad with your near-simultaneous presses grouped \
-                     onto the same frame. In your game or emulator's controller settings, SELECT the \
-                     virtual \"Xbox 360 Controller\" as your pad \u{2014} the game then reads only the \
-                     synced pad, while your real stick quietly drives it underneath. Works in every \
-                     game that lets you pick a controller (most emulators + fighting games).",
-                );
+                ui.label(format!(
+                    "NOBD presents a virtual pad with your near-simultaneous presses grouped onto the \
+                     same frame. In your game or emulator's controller settings, SELECT the virtual \
+                     \"{steam_name}\" as your pad \u{2014} the game then reads only the synced pad, while \
+                     your real stick quietly drives it underneath. Works in every game that lets you \
+                     pick a controller (most emulators + fighting games)."
+                ));
                 ui.add_space(2.0);
                 ui.label(
                     RichText::new(
-                        "If a game grabs every controller at once and you get doubled inputs, that game \
-                         needs the real pad hidden (HidHide) \u{2014} an optional advanced step, and a \
+                        "Tip: if your real stick is also an Xbox pad, set \"Virtual pad\" (top bar) to \
+                         DualShock 4 \u{2014} Steam then lists it as a separate \"Wireless Controller\" so \
+                         you can tell them apart. If a game grabs every controller at once and you get \
+                         doubled inputs, it needs the real pad hidden (HidHide) \u{2014} optional, and a \
                          non-issue on native-HID NOBD hardware.",
                     )
                     .size(11.0)
