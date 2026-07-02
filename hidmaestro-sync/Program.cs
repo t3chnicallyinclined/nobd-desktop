@@ -79,12 +79,32 @@ internal static class Program
     {
         if (args.Contains("--selftest")) return SelfTest.Run();
 
+        // Install (+trust) the HIDMaestro driver only, then exit. Used to
+        // bootstrap the driver so the pure-Rust hm-native client can be tested
+        // against it without porting the signing/install path first.
+        if (args.Contains("--install-only"))
+        {
+            using var ictx = new HMContext();
+            ictx.LoadDefaultProfiles();
+            Console.Write("Installing HIDMaestro driver (+ trusting its cert)… ");
+            ictx.InstallDriver();
+            Console.WriteLine("OK — driver is in the DriverStore.");
+            return 0;
+        }
+
         string? profileArg = ArgValue(args, "--profile");
         uint fallbackWindow = uint.TryParse(ArgValue(args, "--window"), out var w) ? Math.Clamp(w, 1, 16) : 5;
 
         if (!IsElevated())
             Console.WriteLine("WARNING: not elevated. InstallDriver()/CreateController()/OEM-name branding " +
                               "need admin — run this from an elevated terminal or expect it to fail.");
+
+        // Latency trick #4.2 (applicable one from the research catalog): raise our
+        // process priority so the ~1 kHz submit loop isn't preempted. HIGH (not
+        // REALTIME) — the loop sleeps 1ms, it's not a busy-spin, so HIGH is safe
+        // and REALTIME risks starving the system. (The bigger tail win — boosting
+        // the HIDMaestro companion's WUDFHost thread — is a separate follow-up.)
+        try { Process.GetCurrentProcess().PriorityClass = ProcessPriorityClass.High; } catch { }
 
         if (args.Contains("--latency"))
         {

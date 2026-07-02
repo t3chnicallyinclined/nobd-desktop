@@ -35,16 +35,21 @@ pub fn install_driver(cert_path: &str, inf_path: &str) -> io::Result<()> {
 /// True if a `hidmaestro.inf` package is present in the DriverStore — the
 /// reliable success signal (pnputil rc is unreliable across locales).
 pub fn driver_installed() -> bool {
+    installed_inf_path().is_some()
+}
+
+/// Full path to the installed `hidmaestro.inf` in the DriverStore, if present.
+/// Lets the de-risk test bind our devnode against a C#-installed driver without
+/// vendoring our own bundle yet.
+pub fn installed_inf_path() -> Option<String> {
     let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
     let repo = format!(r"{root}\System32\DriverStore\FileRepository");
-    std::fs::read_dir(repo)
-        .map(|rd| {
-            rd.flatten().any(|e| {
-                e.file_name()
-                    .to_string_lossy()
-                    .to_ascii_lowercase()
-                    .starts_with("hidmaestro.inf_amd64_")
-            })
-        })
-        .unwrap_or(false)
+    let entry = std::fs::read_dir(repo).ok()?.flatten().find(|e| {
+        e.file_name()
+            .to_string_lossy()
+            .to_ascii_lowercase()
+            .starts_with("hidmaestro.inf_amd64_")
+    })?;
+    let inf = entry.path().join("hidmaestro.inf");
+    inf.exists().then(|| inf.to_string_lossy().into_owned())
 }
