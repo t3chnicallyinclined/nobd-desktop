@@ -38,7 +38,6 @@ const DICD_GENERATE_ID: u32 = 0x0000_0001;
 const SPDRP_HARDWAREID: u32 = 0x0000_0001;
 const DIF_REGISTERDEVICE: u32 = 0x0000_0019;
 const DIF_REMOVE: u32 = 0x0000_0005;
-const DIGCF_PRESENT: u32 = 0x0000_0002;
 
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -85,7 +84,9 @@ pub fn remove_devices(vid: u16, pid: u16) -> u32 {
     let hwid = format!("root\\vid_{vid:04x}&pid_{pid:04x}");
     let mut removed = 0u32;
     unsafe {
-        let dis = SetupDiGetClassDevsW(&GUID_DEVCLASS_HIDCLASS, std::ptr::null(), 0, DIGCF_PRESENT);
+        // flags = 0 (NOT DIGCF_PRESENT) so we also enumerate GHOST (non-present)
+        // devnodes and clean stale entries left by prior installs/switches.
+        let dis = SetupDiGetClassDevsW(&GUID_DEVCLASS_HIDCLASS, std::ptr::null(), 0, 0);
         if dis as isize == -1 {
             return 0;
         }

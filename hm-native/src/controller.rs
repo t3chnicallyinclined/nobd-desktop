@@ -12,9 +12,14 @@ use crate::report::{pack, REPORT_DESCRIPTOR, REPORT_LEN};
 use crate::shared::InputChannel;
 use crate::{device, install, oem};
 
-/// The NOBD virtual controller identity — matches the C# `NobdProfile`.
+/// The NOBD virtual controller identity.
 pub const NOBD_VID: u16 = 0x1209; // pid.codes
-pub const NOBD_PID: u16 = 0x4E42; // "NB" — placeholder pending pid.codes registration
+/// Distinct from the app's ViGEm backend (which uses 1209:4E42) so the two
+/// never collide and the "NOBD Controller" OEM name doesn't bleed onto the
+/// ViGEm pad. Placeholder pending pid.codes registration.
+pub const NOBD_PID: u16 = 0x4E43;
+/// The old shared PID that collided with the ViGEm backend — cleaned up on setup.
+const LEGACY_PID: u16 = 0x4E42;
 pub const NOBD_LABEL: &str = "NOBD Controller";
 /// Controller index N ↔ `Global\HIDMaestroInput<N>` ↔ `Device Parameters\ControllerIndex`.
 pub const NOBD_INDEX: u32 = 0;
@@ -29,7 +34,15 @@ const INPUT_REPORT_LEN: u32 = REPORT_LEN as u32;
 /// vendored bundle shipped next to the app. Returns the device instance id.
 pub fn setup(cert_path: &str, inf_path: &str) -> io::Result<String> {
     install::install_driver(cert_path, inf_path)?;
+    // Migrate off the old shared 1209:4E42 identity: remove any old HIDMaestro
+    // devnodes on it and clear its OEM name so the ViGEm pad stops showing as
+    // "NOBD Controller". (remove_devices only matches ROOT\ HIDMaestro nodes, so
+    // it never touches a live ViGEm USB device.)
+    let _ = device::remove_devices(NOBD_VID, LEGACY_PID);
+    oem::clear_oem_name(NOBD_VID, LEGACY_PID);
+
     device::write_instance_config(NOBD_INDEX, NOBD_VID, NOBD_PID, NOBD_LABEL, INPUT_REPORT_LEN)?;
+    // create_device dedups our PID first (incl. ghosts) → exactly one device.
     let instance_id =
         device::create_device(NOBD_INDEX, NOBD_VID, NOBD_PID, NOBD_LABEL, inf_path)?;
     oem::set_oem_name(NOBD_VID, NOBD_PID, NOBD_LABEL)?;
