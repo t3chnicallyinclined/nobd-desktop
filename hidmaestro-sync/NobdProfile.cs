@@ -23,7 +23,10 @@ internal static class NobdProfile
     public const ushort Pid = 0x0001; // dev/prototyping PID (pid.codes test range)
 
     public const string Id = "nobd-fightstick";
-    public const string Label = "NOBD"; // shown in joy.cpl / Steam / game pickers
+    // The user-facing name shown in joy.cpl / Steam / in-game controller pickers.
+    // Used as BOTH the USB product string (SDL3/Steam/Chrome) and the joy.cpl
+    // OEM-name override label, so the device reads "NOBD Controller" everywhere.
+    public const string Label = "NOBD Controller";
 
     public static HMProfile Build() =>
         new HMProfileBuilder()
