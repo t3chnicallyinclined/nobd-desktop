@@ -1,62 +1,52 @@
-//! De-risk harness for the pure-Rust HIDMaestro client (`hm-native`).
+//! End-to-end test of the FULLY pure-Rust path: install our VENDORED, re-signed
+//! driver bundle (no C#), create the NOBD devnode, brand it, and drive it.
 //!
-//! Prereq — install the HIDMaestro driver once, from an ELEVATED terminal:
-//!   dotnet run --project ...\hidmaestro-sync -c Release -- --install-only
+//! Prereq: package the bundle once (non-elevated):
+//!   powershell -File hm-native\scripts\package-driver.ps1
+//! Then run THIS elevated. To validate OUR bundle rather than a prior copy, it
+//! first uninstalls any existing hidmaestro driver, then installs ours.
 //!
-//! Then run THIS elevated. It creates our NOBD devnode (OUR descriptor + OEM
-//! name) bound to that driver and drives a visible pattern — proving the whole
-//! port end to end: devnode creation, our HID descriptor, the shared-memory
-//! seqlock submit, and the joy.cpl branding. If "NOBD Controller" shows up in
-//! joy.cpl and its A button toggles, the ABI port is validated.
-//!
-//! NOTE: each run creates a fresh devnode (DICD_GENERATE_ID). If stale
-//! "NOBD Controller" nodes pile up, remove them in Device Manager between runs.
+//! If joy.cpl shows ONE "NOBD Controller" that toggles A / rotates the hat, the
+//! entire stack — install, devnode, descriptor, seqlock submit, branding — is
+//! pure Rust driving a vendored driver. Zero .NET anywhere.
 
+use std::path::Path;
 use std::thread::sleep;
 use std::time::Duration;
 
-use hm_native::report::REPORT_LEN;
-use hm_native::{device, install, oem, NobdController, NOBD_LABEL, NOBD_PID, NOBD_VID};
+use hm_native::{install, setup, NobdController};
 
 fn main() {
-    let inf = match install::installed_inf_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("HIDMaestro driver not installed. First, from an elevated terminal:");
-            eprintln!(r"  dotnet run --project C:\Users\trist\projects\nobd-desktop\hidmaestro-sync -c Release -- --install-only");
-            std::process::exit(1);
-        }
-    };
-    println!("DriverStore inf: {inf}");
-
-    println!("Writing driver config (our descriptor)…");
-    device::write_instance_config(0, NOBD_VID, NOBD_PID, NOBD_LABEL, REPORT_LEN as u32)
-        .expect("write_instance_config (needs elevation)");
-
-    println!("Creating NOBD devnode…");
-    let iid = device::create_device(0, NOBD_VID, NOBD_PID, NOBD_LABEL, &inf)
-        .expect("create_device (needs elevation)");
-    println!("  instance: {iid}");
-
-    println!("Branding joy.cpl name -> \"{NOBD_LABEL}\"…");
-    match oem::set_oem_name(NOBD_VID, NOBD_PID, NOBD_LABEL) {
-        Ok(()) => println!("  branded."),
-        // Non-fatal: the driver also sets BusReportedDeviceDesc from our
-        // ProductString, so the device still shows as "NOBD Controller".
-        Err(e) => println!("  (OEM branding failed: {e} — continuing; driver name still applies)"),
+    let dir = concat!(env!("CARGO_MANIFEST_DIR"), r"\driver");
+    let cer = format!(r"{dir}\nobd-driver.cer");
+    let inf = format!(r"{dir}\hidmaestro.inf");
+    if !Path::new(&inf).exists() || !Path::new(&cer).exists() {
+        eprintln!("Vendored bundle missing. First run (non-elevated):");
+        eprintln!(r"  powershell -File C:\Users\trist\projects\nobd-desktop\hm-native\scripts\package-driver.ps1");
+        std::process::exit(1);
     }
+
+    println!("Uninstalling any existing HIDMaestro driver (clean slate)…");
+    let n = install::uninstall_hidmaestro();
+    println!("  removed {n} package(s).");
+
+    println!("Installing our VENDORED bundle + creating the NOBD device (pure Rust)…");
+    println!("  cert: {cer}");
+    println!("  inf:  {inf}");
+    let iid = setup(&cer, &inf).expect("setup (needs elevation)");
+    println!("Setup OK — device instance: {iid}");
 
     let mut ctrl = NobdController::open().expect("open shared channel");
     println!("event signalling: {}", ctrl.has_event());
     println!();
-    println!("-> Open joy.cpl — you should see \"NOBD Controller\".");
-    println!("-> Its A button toggles ~1 Hz and the hat rotates. Ctrl+C to stop.");
+    println!("-> joy.cpl should show ONE \"NOBD Controller\".");
+    println!("-> A toggles ~1 Hz, hat rotates. Ctrl+C to stop.");
 
     const A: u16 = 0x1000;
     const DPAD: [u16; 4] = [0x0001, 0x0008, 0x0002, 0x0004]; // Up, Right, Down, Left
     let mut tick: u32 = 0;
     loop {
-        let a = if (tick / 30) % 2 == 0 { A } else { 0 }; // ~1s toggle at 33ms
+        let a = if (tick / 30) % 2 == 0 { A } else { 0 };
         let hat = DPAD[((tick / 15) % 4) as usize];
         ctrl.submit(a | hat, 0, 0, 0, 0);
         sleep(Duration::from_millis(33));

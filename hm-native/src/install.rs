@@ -38,6 +38,35 @@ pub fn driver_installed() -> bool {
     installed_inf_path().is_some()
 }
 
+/// Remove every installed `hidmaestro.inf` driver package (best-effort). Used
+/// to get a clean slate so we validate OUR vendored bundle, not a prior copy.
+/// Parses `pnputil /enum-drivers` for the locale-stable `oemNN.inf` + original
+/// `hidmaestro.inf` tokens. Returns how many packages were deleted.
+pub fn uninstall_hidmaestro() -> u32 {
+    let output = match Command::new("pnputil").arg("/enum-drivers").output() {
+        Ok(o) => o,
+        Err(_) => return 0,
+    };
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut removed = 0;
+    for block in text.split("\r\n\r\n") {
+        if !block.to_ascii_lowercase().contains("hidmaestro.inf") {
+            continue;
+        }
+        let oem = block.split_whitespace().find(|t| {
+            let t = t.to_ascii_lowercase();
+            t.starts_with("oem") && t.ends_with(".inf")
+        });
+        if let Some(oem) = oem {
+            let _ = Command::new("pnputil")
+                .args(["/delete-driver", oem, "/uninstall", "/force"])
+                .status();
+            removed += 1;
+        }
+    }
+    removed
+}
+
 /// Full path to the installed `hidmaestro.inf` in the DriverStore, if present.
 /// Lets the de-risk test bind our devnode against a C#-installed driver without
 /// vendoring our own bundle yet.
