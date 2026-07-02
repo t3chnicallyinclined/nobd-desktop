@@ -1169,6 +1169,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc0fef456e4baa96da950455cd02c081ca953b141298e41db3fc7e36b1da849c"
 
 [[package]]
+name = "hm-native"
+version = "0.1.0"
+dependencies = [
+ "windows-sys 0.52.0",
+ "winreg",
+]
+
+[[package]]
 name = "ico"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1664,10 +1672,10 @@ dependencies = [
  "eframe",
  "egui",
  "gilrs",
+ "hm-native",
  "ico",
  "nobd-shared",
  "tray-icon",
- "vigem-client",
  "windows-sys 0.52.0",
  "winreg",
  "winresource",
@@ -2856,24 +2864,6 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
-
-[[package]]
-name = "vigem-client"
-version = "0.1.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b857e6f99efe1e1eb1e4dfb035de8ae7ec8ec56bd1928edcbd7c6e4427634d52"
-dependencies = [
- "winapi",
-]
-
-[[package]]
-name = "vigem-sync"
-version = "0.1.0"
-dependencies = [
- "nobd-shared",
- "vigem-client",
- "windows-sys 0.52.0",
-]
 
 [[package]]
 name = "walkdir"

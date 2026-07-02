@@ -26,7 +26,9 @@ $src = Get-ChildItem $Source -Directory -ErrorAction SilentlyContinue |
     Where-Object { Test-Path (Join-Path $_.FullName "hidmaestro.inf") } | Select-Object -First 1
 if (-not $src) { throw "HIDMaestro driver files not found in $Source. Run the C# --install-only once first." }
 Write-Host "Source: $($src.FullName)"
-foreach ($f in "hidmaestro.inf", "HIDMaestro.dll", "hidmaestro.cat") {
+$files = "hidmaestro.inf", "HIDMaestro.dll", "hidmaestro.cat",
+         "hidmaestro_xusb.inf", "HMXInput.dll", "hidmaestro_xusb.cat"
+foreach ($f in $files) {
     Copy-Item (Join-Path $src.FullName $f) (Join-Path $dst $f) -Force
 }
 
@@ -53,8 +55,10 @@ Export-PfxCertificate -Cert $cert -FilePath $pfx -Password $sec | Out-Null
 $signtool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Recurse -Filter signtool.exe -ErrorAction SilentlyContinue |
     Where-Object { $_.FullName -like '*10.0.26100.0\x64*' } | Select-Object -First 1
 if (-not $signtool) { throw "signtool.exe (SDK 26100 x64) not found" }
-& $signtool.FullName sign /fd SHA256 /f $pfx /p $PfxPass (Join-Path $dst "hidmaestro.cat")
-if ($LASTEXITCODE -ne 0) { throw "signtool failed ($LASTEXITCODE)" }
+foreach ($cat in "hidmaestro.cat", "hidmaestro_xusb.cat") {
+    & $signtool.FullName sign /fd SHA256 /f $pfx /p $PfxPass (Join-Path $dst $cat)
+    if ($LASTEXITCODE -ne 0) { throw "signtool failed on $cat ($LASTEXITCODE)" }
+}
 
 Write-Host ""
 Write-Host "Vendored bundle ready in $dst"

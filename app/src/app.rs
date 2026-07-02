@@ -98,10 +98,8 @@ pub struct FingerGapApp {
     /// System-wide sync (read real pad → group → virtual pad). Runs by default;
     /// dropping it unplugs the virtual pad.
     sync_service: crate::sync_service::SyncService,
-    /// Virtual-pad identity (Xbox 360 vs DualShock 4).
+    /// NOBD Controller mode (branded HID vs XInput).
     pad_type: PadType,
-    /// Was the ViGEmBus driver present at launch? (Drives the install button.)
-    vigem_installed: bool,
 }
 
 impl FingerGapApp {
@@ -151,7 +149,6 @@ impl FingerGapApp {
             selected_hid_label,
             sync_service: crate::sync_service::SyncService::start(pad_type),
             pad_type,
-            vigem_installed: crate::sync_service::vigem_present(),
         }
     }
 
@@ -333,12 +330,12 @@ impl eframe::App for FingerGapApp {
 
             // System-wide sync status banner.
             let err = self.sync_service.error();
-            if err == crate::sync_service::ERR_NO_VIGEM {
-                ui.colored_label(RED, "\u{25CF} ViGEmBus not found — install it to enable system-wide sync");
+            if err == crate::sync_service::ERR_NO_NOBD {
+                ui.colored_label(RED, "\u{25CF} NOBD Controller not set up — click Enable");
             } else if err == crate::sync_service::ERR_NO_XINPUT {
                 ui.colored_label(RED, "\u{25CF} XInput unavailable");
             } else if self.sync_service.is_active() {
-                ui.colored_label(GREEN, "\u{25CF} System-wide sync ACTIVE — virtual NOBD pad is live");
+                ui.colored_label(GREEN, "\u{25CF} System-wide sync ACTIVE — NOBD Controller is live");
             } else if self.sync_service.real_slot().is_none() {
                 ui.colored_label(YELLOW, "\u{25CF} Waiting for a controller…");
             } else {
@@ -463,41 +460,38 @@ impl eframe::App for FingerGapApp {
                 });
             }
 
-            // Virtual-pad identity picker (System-wide sync tab only). DualShock 4
-            // shows distinctly in Steam so it's tell-apart-able from a real Xbox stick.
+            // NOBD Controller mode (System-wide sync tab only): the native pad is
+            // the only backend; the choice is just how it presents to games.
             if self.active_tab == Tab::NobdSync {
                 let mut pt = self.pad_type;
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("Virtual pad").size(12.0).color(Color32::GRAY));
+                    ui.label(RichText::new("NOBD Controller").size(12.0).color(Color32::GRAY));
                     egui::ComboBox::from_id_salt("pad_type")
                         .selected_text(match pt {
-                            PadType::Xbox360 => "Xbox 360",
-                            PadType::DualShock4 => "DualShock 4",
-                            PadType::NobdNative => "NOBD Controller",
+                            PadType::Hid => "Branded (Steam / DInput)",
+                            PadType::Xinput => "XInput (MvC2)",
                         })
                         .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut pt, PadType::NobdNative, "NOBD Controller (native, branded)");
-                            ui.selectable_value(&mut pt, PadType::Xbox360, "Xbox 360 (XInput-native)");
-                            ui.selectable_value(&mut pt, PadType::DualShock4, "DualShock 4 (distinct from a real Xbox stick)");
+                            ui.selectable_value(&mut pt, PadType::Hid, "Branded — \"NOBD Controller\" in Steam / joy.cpl");
+                            ui.selectable_value(&mut pt, PadType::Xinput, "XInput — for raw-XInput games (MvC2)");
                         });
                 })
                 .response
-                .on_hover_text("NOBD Controller is a native, branded HID pad (needs a one-time setup). DualShock 4 / Xbox 360 use ViGEm — pick DS4 if your real stick is an Xbox pad so Steam can tell them apart; Xbox 360 for raw-XInput games outside Steam.");
+                .on_hover_text("Branded mode shows as \"NOBD Controller\" in Steam / joy.cpl / DirectInput games. XInput mode presents as an Xbox 360 pad for games that only read XInput (e.g. MvC2). Both are the native NOBD Controller — no ViGEm.");
                 if pt != self.pad_type {
                     self.pad_type = pt;
                     self.sync_service = crate::sync_service::SyncService::start(pt);
                     self.persist_ui();
                 }
 
-                // NOBD Controller (native) needs a one-time elevated setup: install
-                // the driver + create the branded device. After that the login task
-                // keeps the app elevated so there are no more prompts.
-                if self.pad_type == PadType::NobdNative && !crate::nobd_setup::is_ready() {
+                // One-time elevated setup for the selected mode. After it, the
+                // login task keeps the app elevated so there are no more prompts.
+                if !crate::nobd_setup::is_ready(self.pad_type) {
                     ui.horizontal(|ui| {
                         ui.colored_label(YELLOW, "\u{25CF}");
                         if crate::nobd_setup::is_elevated() {
                             if ui.button("Enable NOBD Controller").clicked() {
-                                if crate::nobd_setup::run_setup().is_ok() {
+                                if crate::nobd_setup::run_setup(self.pad_type).is_ok() {
                                     self.sync_service =
                                         crate::sync_service::SyncService::start(self.pad_type);
                                 }
@@ -507,17 +501,10 @@ impl eframe::App for FingerGapApp {
                                     .size(11.0)
                                     .color(Color32::GRAY),
                             );
-                        } else {
-                            if ui.button("Enable NOBD Controller (admin)").clicked() {
-                                if crate::nobd_setup::relaunch_elevated_for_setup().is_ok() {
-                                    std::process::exit(0);
-                                }
+                        } else if ui.button("Enable NOBD Controller (admin)").clicked() {
+                            if crate::nobd_setup::relaunch_elevated_for_setup(self.pad_type).is_ok() {
+                                std::process::exit(0);
                             }
-                            ui.label(
-                                RichText::new("Restarts elevated for a one-time setup.")
-                                    .size(11.0)
-                                    .color(Color32::GRAY),
-                            );
                         }
                     });
                 }
@@ -525,7 +512,7 @@ impl eframe::App for FingerGapApp {
         });
 
         match self.active_tab {
-            Tab::NobdSync => draw_nobd_sync(ctx, &self.sync_service, self.pad_type, self.vigem_installed),
+            Tab::NobdSync => draw_nobd_sync(ctx, &self.sync_service, self.pad_type),
             Tab::GapTester => self.draw_gap_tester(ctx),
             Tab::ButtonMonitor => self.draw_button_monitor(ctx),
         }
@@ -544,18 +531,12 @@ impl eframe::App for FingerGapApp {
 
 // ─── SYSTEM-WIDE SYNC TAB (drives the in-GUI SyncService → virtual NOBD pad) ───
 
-fn draw_nobd_sync(
-    ctx: &egui::Context,
-    sync: &crate::sync_service::SyncService,
-    pad: PadType,
-    vigem_installed: bool,
-) {
+fn draw_nobd_sync(ctx: &egui::Context, sync: &crate::sync_service::SyncService, pad: PadType) {
     use std::sync::atomic::Ordering;
     let s = nobd_shared::state();
     let steam_name = match pad {
-        PadType::Xbox360 => "XInput Controller (#N)",
-        PadType::DualShock4 => "Wireless Controller (DualShock 4)",
-        PadType::NobdNative => "NOBD Controller",
+        PadType::Hid => "NOBD Controller",
+        PadType::Xinput => "NOBD Controller (Xbox 360 / XInput)",
     };
 
     egui::CentralPanel::default().show(ctx, |ui| {
@@ -564,10 +545,7 @@ fn draw_nobd_sync(
         // Service status.
         let err = sync.error();
         ui.horizontal(|ui| {
-            if err == crate::sync_service::ERR_NO_VIGEM {
-                ui.colored_label(RED, "\u{25CF}");
-                ui.label(RichText::new("ViGEmBus driver not found").color(RED));
-            } else if err == crate::sync_service::ERR_NO_XINPUT {
+            if err == crate::sync_service::ERR_NO_XINPUT {
                 ui.colored_label(RED, "\u{25CF}");
                 ui.label(RichText::new("XInput unavailable").color(RED));
             } else if err == crate::sync_service::ERR_NO_NOBD {
@@ -587,37 +565,15 @@ fn draw_nobd_sync(
                 ui.label("Starting…");
             }
         });
-        if err == crate::sync_service::ERR_NO_VIGEM {
-            ui.label(
-                RichText::new("Install the ViGEmBus driver (free), then restart NOBD.")
-                    .size(12.0)
-                    .color(Color32::GRAY),
-            );
-            ui.hyperlink("https://github.com/nefarius/ViGEmBus/releases/latest");
-        }
         ui.separator();
 
-        // ── Setup: the one dependency + how to wire it into a game ──
+        // ── Setup: how to wire it into a game (all native NOBD, no ViGEm) ──
         ui.label(RichText::new("Setup").strong().size(15.0));
-        ui.horizontal(|ui| {
-            if vigem_installed {
-                ui.colored_label(GREEN, "1.  \u{2713} ViGEmBus driver installed");
-            } else {
-                ui.label("1.");
-                if ui.button("Install ViGEmBus").clicked() {
-                    install_vigembus();
-                }
-                ui.label(
-                    RichText::new("(one-time, free — approve the UAC prompt, then restart NOBD)")
-                        .size(12.0)
-                        .color(Color32::GRAY),
-                );
-            }
-        });
-        ui.label("2.  Connect your controller (XInput). NOBD plugs in the virtual NOBD pad automatically — the banner above turns green.");
-        ui.label("3.  Turn on \"NOBD sync window\" below and set your window (find your number on the Finger Gap Tester tab).");
+        ui.label("1.  Pick a NOBD Controller mode above and click Enable (one-time, needs admin).");
+        ui.label("2.  Connect your controller (XInput). The NOBD Controller comes up automatically — the banner above turns green.");
+        ui.label("3.  Turn on \"NOBD sync window\" below and set your window (from the Finger Gap Tester tab).");
         ui.label(format!(
-            "4.  In your game/emulator's controller settings, select the virtual \"{steam_name}\" \u{2014} your real stick drives it underneath, grouped."
+            "4.  In your game/emulator's controller settings, select \"{steam_name}\" \u{2014} your real stick drives it underneath, grouped."
         ));
         ui.separator();
 
@@ -830,13 +786,10 @@ fn draw_gap_tester(&self, ctx: &egui::Context) {
         let real_slot = self.sync_service.real_slot();
         let sync_active = self.sync_service.is_active();
         let is_xinput = self.source_kind == SourceKind::XInput;
-        // The synced pad's actual name in a game's controller list. The Xbox 360
-        // pad uses a custom NOBD VID, so games that don't recognize it (Steam) show
-        // it as a generic "XInput Controller #N" — NOT "Xbox 360 Controller".
+        // The synced pad's name in a game's controller list.
         let nobd_pad_name = match self.pad_type {
-            PadType::Xbox360 => "XInput Controller",
-            PadType::DualShock4 => "Wireless Controller",
-            PadType::NobdNative => "NOBD Controller",
+            PadType::Hid => "NOBD Controller",
+            PadType::Xinput => "NOBD Controller (XInput)",
         };
 
         ui.add_space(4.0);
@@ -1256,32 +1209,4 @@ fn banner(
     ui.add_space(6.0);
 }
 
-/// Find a bundled ViGEmBus installer (any *vigembus*.exe) sitting next to nobd.exe.
-fn vigembus_installer_path() -> Option<std::path::PathBuf> {
-    let dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
-    std::fs::read_dir(&dir)
-        .ok()?
-        .flatten()
-        .map(|e| e.path())
-        .find(|p| {
-            p.extension().map_or(false, |e| e.eq_ignore_ascii_case("exe"))
-                && p.file_name()
-                    .and_then(|n| n.to_str())
-                    .map_or(false, |n| n.to_lowercase().contains("vigembus"))
-        })
-}
-
-/// Launch the bundled ViGEmBus installer (UAC prompts for the driver install), or
-/// open the download page if no installer is bundled next to nobd.exe.
-fn install_vigembus() {
-    use windows_sys::Win32::UI::Shell::ShellExecuteW;
-    let wide = |s: &str| s.encode_utf16().chain(std::iter::once(0)).collect::<Vec<u16>>();
-    let verb = wide("open");
-    let target = vigembus_installer_path()
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "https://github.com/nefarius/ViGEmBus/releases/latest".to_owned());
-    let file = wide(&target);
-    unsafe {
-        ShellExecuteW(0, verb.as_ptr(), file.as_ptr(), std::ptr::null(), std::ptr::null(), 1 /* SW_SHOWNORMAL */);
-    }
-}
+// (ViGEmBus install helpers removed — the app is all-HIDMaestro now.)

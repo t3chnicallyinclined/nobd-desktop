@@ -1,5 +1,5 @@
 [workspace]
-members = ["app", "shared", "vigem-sync", "hm-native"]
+members = ["app", "shared", "hm-native"]
 resolver = "2"
 
 # Universal sync replaced the per-game DINPUT8.dll, so the cdylib package is gone.

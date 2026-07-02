@@ -1,11 +1,10 @@
 //! System-wide NOBD sync — runs in-process. Reads the real controller, runs the
-//! NOBD sync window on its attack buttons, and presents the grouped result as a
-//! ViGEm virtual Xbox pad. Every game reads the virtual pad, so the sync is
-//! universal — no per-game DLL. Driven live by `nobd_shared` (enabled + window).
+//! NOBD sync window on its attack buttons, and presents the grouped result as the
+//! native NOBD Controller via the pure-Rust `hm-native` client (no ViGEm).
 //!
-//! HidHide (hiding the real pad so games see ONLY the synced pad) is layered on
-//! separately; without it both pads are visible (fine for the Finger Gap Tester,
-//! doubled inputs in real games).
+//! Two modes: `Hid` = the branded "NOBD Controller" (DirectInput/Steam/joy.cpl),
+//! `Xinput` = an Xbox 360 wired pad for raw-XInput games (MvC2). Both require the
+//! one-time elevated setup and an elevated process (to create the shared section).
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use std::sync::Arc;
@@ -22,106 +21,40 @@ use windows_sys::Win32::UI::Input::XboxController::XINPUT_STATE;
 const ATTACK_MASK: u16 = 0xF300;
 const NO_SLOT: u32 = u32::MAX;
 
-/// Custom identity for the Xbox-360-style (still XInput, via ViGEm's MS_COMP_XUSB10
-/// compatible ID) virtual pad, so it's a DIFFERENT VID/PID than a genuine Xbox stick
-/// (045E/028E) and can be told apart. VID 0x1209 = pid.codes (open-source/hobby),
-/// PID 0x4E42 = "NB". Experimental — if a game stops recognizing it, revert to
-/// TargetId::XBOX360_WIRED.
-const NOBD_VID: u16 = 0x1209;
-const NOBD_PID: u16 = 0x4E42;
-
 /// error codes for `SyncStatus::error`
 pub const ERR_NONE: u8 = 0;
 pub const ERR_NO_XINPUT: u8 = 1;
-pub const ERR_NO_VIGEM: u8 = 2;
-/// NobdNative backend couldn't open its device (not set up, or not elevated).
+/// The NOBD device couldn't be opened (not set up, or not elevated).
 pub const ERR_NO_NOBD: u8 = 3;
 
-/// Is the ViGEmBus driver installed + reachable? (Cheap connect probe.)
-pub fn vigem_present() -> bool {
-    vigem_client::Client::connect().is_ok()
-}
-
-/// Which identity the virtual pad presents as. DualShock4 shows distinctly in
-/// Steam ("Wireless Controller"), so it's tell-apart-able from a real Xbox stick;
-/// Xbox360 is XInput-native (needed for raw-XInput games outside Steam).
+/// Which virtual pad the NOBD Controller presents as. Persisted as u32.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum PadType {
-    Xbox360,
-    DualShock4,
-    /// Native "NOBD Controller" HID device via the pure-Rust hm-native client
-    /// (branded, no ViGEm). Requires one-time elevated setup.
-    NobdNative,
+    /// Branded plain-HID "NOBD Controller" (DirectInput / Steam / joy.cpl).
+    Hid,
+    /// XInput (Xbox 360 wired) — for raw-XInput games like MvC2.
+    Xinput,
 }
 
 impl PadType {
     pub fn from_u32(n: u32) -> Self {
-        match n {
-            1 => PadType::DualShock4,
-            2 => PadType::NobdNative,
-            _ => PadType::Xbox360,
+        if n == 1 {
+            PadType::Xinput
+        } else {
+            PadType::Hid
         }
     }
     pub fn as_u32(self) -> u32 {
         match self {
-            PadType::Xbox360 => 0,
-            PadType::DualShock4 => 1,
-            PadType::NobdNative => 2,
+            PadType::Hid => 0,
+            PadType::Xinput => 1,
         }
     }
-}
-
-/// Whichever virtual-pad target the loop drives.
-enum Target {
-    X(vigem_client::Xbox360Wired<vigem_client::Client>),
-    D(vigem_client::DualShock4Wired<vigem_client::Client>),
-    /// Native NOBD HID device (pure-Rust hm-native client).
-    H(hm_native::NobdController),
-}
-
-/// Translate a grouped XInput button mask (+ analog) into a DS4 HID report.
-/// DS4 buttons: low nibble = dpad hat (8 = neutral), then Square/Cross/Circle/
-/// Triangle, L1/R1, L2/R2, Share/Options, L3/R3.
-fn xbox_to_ds4(buttons: u16, lt: u8, rt: u8, lx: i16, ly: i16, rx: i16, ry: i16) -> vigem_client::DS4Report {
-    let up = buttons & 0x0001 != 0;
-    let down = buttons & 0x0002 != 0;
-    let left = buttons & 0x0004 != 0;
-    let right = buttons & 0x0008 != 0;
-    let hat: u16 = match (up, down, left, right) {
-        (true, false, false, false) => 0,
-        (true, false, false, true) => 1,
-        (false, false, false, true) => 2,
-        (false, true, false, true) => 3,
-        (false, true, false, false) => 4,
-        (false, true, true, false) => 5,
-        (false, false, true, false) => 6,
-        (true, false, true, false) => 7,
-        _ => 8, // neutral
-    };
-    let mut b: u16 = hat;
-    if buttons & 0x4000 != 0 { b |= 0x10; }   // X  -> Square
-    if buttons & 0x1000 != 0 { b |= 0x20; }   // A  -> Cross
-    if buttons & 0x2000 != 0 { b |= 0x40; }   // B  -> Circle
-    if buttons & 0x8000 != 0 { b |= 0x80; }   // Y  -> Triangle
-    if buttons & 0x0100 != 0 { b |= 0x100; }  // LB -> L1
-    if buttons & 0x0200 != 0 { b |= 0x200; }  // RB -> R1
-    if lt > 30 { b |= 0x400; }                // LT -> L2
-    if rt > 30 { b |= 0x800; }                // RT -> R2
-    if buttons & 0x0020 != 0 { b |= 0x1000; } // Back  -> Share
-    if buttons & 0x0010 != 0 { b |= 0x2000; } // Start -> Options
-    if buttons & 0x0040 != 0 { b |= 0x4000; } // LS -> L3
-    if buttons & 0x0080 != 0 { b |= 0x8000; } // RS -> R3
-
-    let axis = |v: i16| (((v as i32) + 32768) >> 8) as u8;
-    vigem_client::DS4Report {
-        thumb_lx: axis(lx),
-        thumb_ly: 255u8.wrapping_sub(axis(ly)), // DS4 Y is inverted vs XInput
-        thumb_rx: axis(rx),
-        thumb_ry: 255u8.wrapping_sub(axis(ry)),
-        buttons: b,
-        special: 0,
-        trigger_l: lt,
-        trigger_r: rt,
+    pub fn mode(self) -> hm_native::PadMode {
+        match self {
+            PadType::Hid => hm_native::PadMode::Hid,
+            PadType::Xinput => hm_native::PadMode::Xinput,
+        }
     }
 }
 
@@ -158,14 +91,14 @@ fn xinput_state(f: XInputGetStateFn, slot: u32) -> Option<XINPUT_STATE> {
 }
 
 pub struct SyncStatus {
-    /// Virtual pad plugged and the loop is running.
+    /// Virtual pad live and the loop is running.
     pub active: AtomicBool,
     /// The real pad is currently reporting.
     pub real_present: AtomicBool,
     /// XInput slot of the real pad (NO_SLOT until found).
     pub real_slot: AtomicU32,
-    /// XInput slot the virtual pad landed on (NO_SLOT if unknown / DS4 pad, which
-    /// isn't an XInput device).
+    /// XInput slot the virtual pad landed on (only for XInput mode; the branded
+    /// HID pad isn't an XInput device so this stays NO_SLOT).
     pub virtual_slot: AtomicU32,
     /// ERR_* code.
     pub error: AtomicU8,
@@ -183,7 +116,7 @@ impl SyncStatus {
     }
 }
 
-/// Background system-wide sync. Drop stops the thread and unplugs the virtual pad.
+/// Background system-wide sync. Drop stops the thread.
 pub struct SyncService {
     stop: Arc<AtomicBool>,
     status: Arc<SyncStatus>,
@@ -219,8 +152,7 @@ impl SyncService {
         }
     }
 
-    /// XInput slot of the virtual NOBD pad (only known for the Xbox 360 pad type;
-    /// a DualShock 4 pad isn't an XInput device so this stays None).
+    /// XInput slot of the virtual NOBD pad (only known in XInput mode).
     pub fn virtual_slot(&self) -> Option<u32> {
         let s = self.status.virtual_slot.load(Ordering::Relaxed);
         if s == NO_SLOT {
@@ -253,7 +185,7 @@ fn run(stop: Arc<AtomicBool>, status: Arc<SyncStatus>, pad: PadType) {
         }
     };
 
-    // Wait for the real pad BEFORE plugging the virtual one (avoid feedback).
+    // Wait for the real pad before opening the virtual one (avoid feedback).
     let real_slot = loop {
         if stop.load(Ordering::Relaxed) {
             return;
@@ -268,65 +200,23 @@ fn run(stop: Arc<AtomicBool>, status: Arc<SyncStatus>, pad: PadType) {
         std::thread::sleep(Duration::from_millis(500));
     };
 
-    // Snapshot connected XInput slots BEFORE plugging, so we can identify which
-    // new slot the virtual pad lands on (Xbox 360 pad type only).
+    // Snapshot connected XInput slots (to identify the virtual pad's slot in
+    // XInput mode).
     let before: Vec<u32> = (0..4).filter(|&s| xinput_state(xi, s).is_some()).collect();
 
-    let mut target = match pad {
-        PadType::Xbox360 | PadType::DualShock4 => {
-            let client = match vigem_client::Client::connect() {
-                Ok(c) => c,
-                Err(_) => {
-                    status.error.store(ERR_NO_VIGEM, Ordering::Relaxed);
-                    return;
-                }
-            };
-            match pad {
-                PadType::Xbox360 => {
-                    // Custom VID/PID (not the genuine Xbox 045E/028E) so it's distinguishable
-                    // from a real Xbox stick — still XInput thanks to ViGEm's MS_COMP_XUSB10.
-                    let id = vigem_client::TargetId { vendor: NOBD_VID, product: NOBD_PID };
-                    let mut t = vigem_client::Xbox360Wired::new(client, id);
-                    if t.plugin().is_err() {
-                        status.error.store(ERR_NO_VIGEM, Ordering::Relaxed);
-                        return;
-                    }
-                    let _ = t.wait_ready();
-                    Target::X(t)
-                }
-                _ => {
-                    let mut t = vigem_client::DualShock4Wired::new(
-                        client,
-                        vigem_client::TargetId::DUALSHOCK4_WIRED,
-                    );
-                    if t.plugin().is_err() {
-                        status.error.store(ERR_NO_VIGEM, Ordering::Relaxed);
-                        return;
-                    }
-                    let _ = t.wait_ready();
-                    Target::D(t)
-                }
-            }
-        }
-        PadType::NobdNative => {
-            // Native "NOBD Controller" HID device via the pure-Rust hm-native
-            // client. Requires the one-time elevated setup + an elevated process
-            // (to create the Global\ section). No ViGEm.
-            match hm_native::NobdController::open() {
-                Ok(c) => Target::H(c),
-                Err(_) => {
-                    status.error.store(ERR_NO_NOBD, Ordering::Relaxed);
-                    return;
-                }
-            }
+    let mut ctrl = match hm_native::NobdController::open(pad.mode()) {
+        Ok(c) => c,
+        Err(_) => {
+            status.error.store(ERR_NO_NOBD, Ordering::Relaxed);
+            return;
         }
     };
 
-    // Identify the virtual pad's XInput slot (the newly-connected one). DS4 pads
-    // aren't XInput, so this only resolves for the Xbox 360 pad type.
-    std::thread::sleep(Duration::from_millis(300)); // let XInput enumerate it
-    if let Some(vs) = (0..4).find(|&s| !before.contains(&s) && xinput_state(xi, s).is_some()) {
-        status.virtual_slot.store(vs, Ordering::Relaxed);
+    if pad == PadType::Xinput {
+        std::thread::sleep(Duration::from_millis(300)); // let XInput enumerate it
+        if let Some(vs) = (0..4).find(|&s| !before.contains(&s) && xinput_state(xi, s).is_some()) {
+            status.virtual_slot.store(vs, Ordering::Relaxed);
+        }
     }
 
     unsafe { timeBeginPeriod(1) };
@@ -347,35 +237,15 @@ fn run(stop: Arc<AtomicBool>, status: Arc<SyncStatus>, pad: PadType) {
             let gp = state.Gamepad;
             let grouped =
                 sync.process(gp.wButtons, ATTACK_MASK, ATTACK_MASK, now_us, window_us, enabled);
-            match &mut target {
-                Target::X(t) => {
-                    let out = vigem_client::XGamepad {
-                        buttons: vigem_client::XButtons { raw: grouped },
-                        left_trigger: gp.bLeftTrigger,
-                        right_trigger: gp.bRightTrigger,
-                        thumb_lx: gp.sThumbLX,
-                        thumb_ly: gp.sThumbLY,
-                        thumb_rx: gp.sThumbRX,
-                        thumb_ry: gp.sThumbRY,
-                    };
-                    let _ = t.update(&out);
-                }
-                Target::D(t) => {
-                    let r = xbox_to_ds4(
-                        grouped, gp.bLeftTrigger, gp.bRightTrigger,
-                        gp.sThumbLX, gp.sThumbLY, gp.sThumbRX, gp.sThumbRY,
-                    );
-                    let _ = t.update(&r);
-                }
-                Target::H(c) => {
-                    // hm-native packs XInput-style buttons + our stick/triggers
-                    // into the NOBD HID report. (Our descriptor uses the left
-                    // stick; triggers map to buttons 7/8.)
-                    c.submit(
-                        grouped, gp.bLeftTrigger, gp.bRightTrigger, gp.sThumbLX, gp.sThumbLY,
-                    );
-                }
-            }
+            ctrl.submit(
+                grouped,
+                gp.bLeftTrigger,
+                gp.bRightTrigger,
+                gp.sThumbLX,
+                gp.sThumbLY,
+                gp.sThumbRX,
+                gp.sThumbRY,
+            );
         } else {
             status.real_present.store(false, Ordering::Relaxed);
         }
@@ -384,5 +254,4 @@ fn run(stop: Arc<AtomicBool>, status: Arc<SyncStatus>, pad: PadType) {
     }
 
     status.active.store(false, Ordering::Relaxed);
-    // `target` drops here → virtual pad unplugged.
 }

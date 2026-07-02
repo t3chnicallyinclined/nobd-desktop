@@ -27,8 +27,12 @@ fn main() -> eframe::Result {
     // Relaunched elevated for one-time NOBD Controller setup: install the driver
     // + create the device before the GUI comes up, then continue as the (now
     // elevated) app. Best-effort; the UI reflects success/failure.
-    if std::env::args().any(|a| a == "--setup") && nobd_setup::is_elevated() {
-        let _ = nobd_setup::run_setup();
+    if nobd_setup::is_elevated() {
+        if std::env::args().any(|a| a == "--setup-xinput") {
+            let _ = nobd_setup::run_setup(sync_service::PadType::Xinput);
+        } else if std::env::args().any(|a| a == "--setup-hid") {
+            let _ = nobd_setup::run_setup(sync_service::PadType::Hid);
+        }
     }
 
     let options = eframe::NativeOptions {
