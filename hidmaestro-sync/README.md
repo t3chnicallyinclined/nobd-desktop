@@ -65,10 +65,42 @@ dotnet run -c Release -- --latency 400
 
 ## Status
 
-Spike / evaluation only. If the latency number beats ViGEm and the pad behaves,
-the next step is a C# sidecar wired to the app's shared memory as the default
-universal-sync backend (replacing `vigem-sync`), plus the 3–4 NOBD JSON profiles
-(Xbox 360, PS4/PS5, Native NOBD, Fightstick).
+**Proven.** The native "NOBD Controller" identity shows in joy.cpl, Steam, and
+games, with the NOBD sync window live on top — all user-mode, no WDK, no kernel
+driver. Adopted over ViGEm for the branding (ViGEm is actually slightly faster;
+both are ~0.1 ms, irrelevant at 60 Hz).
+
+Use `run.cmd --window 5` from an **elevated** terminal (it stops any prior
+instance first, so `dotnet run`'s rebuild never hits a file lock).
+
+### Branding & Steam Input — the two name layers
+
+- **Device-list name** (joy.cpl / Steam list): from the USB product string + the
+  three OEM registry tables (`HMOemNameOverride`). Reads **"NOBD Controller"**. ✅
+- **Steam Input *type* name**: when Steam Input takes over the device it
+  classifies it by its VID:PID controller database. Our PID isn't in that DB, so
+  it falls back to the generic **"Input Controller N"**.
+  - **Interim:** disable Steam Input for the NOBD Controller → games read it
+    directly as "NOBD Controller" (and it drops Steam Input's extra remap/latency
+    layer, which we don't want on top of the sync anyway).
+  - **Ship-prep:** register a dedicated pid.codes PID and submit an SDL
+    `gamecontrollerdb` mapping (VID:PID → "NOBD Controller" + button layout) so
+    Steam classifies + labels it correctly even under Steam Input.
+
+> Why the VID:PID matters: `0x1209:0x0001` (the shared pid.codes prototyping PID)
+> is already in Steam's DB as "TapSync Gamepad", which overrode our name. We moved
+> to `0x1209:0x4E42` (unregistered → Steam falls back to our product string).
+
+### Known gaps (spike TODO)
+
+- **Analog triggers not passed through.** The current descriptor is stick + 14
+  buttons + hat, no analog triggers, so `NobdProfile.cs` drops the real pad's
+  L2/R2 analog values. Fine for a digital fightstick; add `.AddTrigger("Left"/
+  "Right", 8)` + trigger passthrough if analog LT/RT is needed.
+- **Generic Steam button labels** until the SDL mapping above is submitted.
+- **Integration:** fold this into the `nobd-desktop` app as the default backend
+  (driven by the existing `Local\NobdSyncState` shared memory), alongside/replacing
+  `vigem-sync`.
 
 > Note: HIDMaestro is MIT-licensed and unsigned (like all these tools); its
 > prebuilt `Core.dll` scans clean on Windows Defender. `InstallDriver()` adds a
