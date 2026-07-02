@@ -20,7 +20,14 @@ internal static class NobdProfile
     //   submit an SDL gamecontrollerdb mapping so Steam/SDL3 label buttons
     //   correctly for VID:PID 1209:<pid>.
     public const ushort Vid = 0x1209;
-    public const ushort Pid = 0x0001; // dev/prototyping PID (pid.codes test range)
+    // 0x0001 was the SHARED pid.codes prototyping PID — Steam's internal VID:PID
+    // name database already maps 1209:0001 to "TapSync Gamepad", overriding our
+    // product string in Steam (joy.cpl still used our OEM name). Using a
+    // distinctive, unlikely-registered PID so Steam has no entry and falls back
+    // to the USB product string ("NOBD Controller").
+    // TODO before shipping: register this exact PID via a pid.codes PR and
+    //   submit an SDL/Steam mapping naming it "NOBD Controller".
+    public const ushort Pid = 0x4E42; // "NB" — placeholder NOBD PID pending pid.codes registration
 
     public const string Id = "nobd-fightstick";
     // The user-facing name shown in joy.cpl / Steam / in-game controller pickers.
