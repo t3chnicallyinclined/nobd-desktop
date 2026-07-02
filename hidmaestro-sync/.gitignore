@@ -1,0 +1,4 @@
+bin/
+obj/
+# Prebuilt third-party binary — fetched via scripts/fetch-hidmaestro.ps1, not committed.
+lib/HIDMaestro.Core.dll
