@@ -473,18 +473,53 @@ impl eframe::App for FingerGapApp {
                         .selected_text(match pt {
                             PadType::Xbox360 => "Xbox 360",
                             PadType::DualShock4 => "DualShock 4",
+                            PadType::NobdNative => "NOBD Controller",
                         })
                         .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut pt, PadType::NobdNative, "NOBD Controller (native, branded)");
                             ui.selectable_value(&mut pt, PadType::Xbox360, "Xbox 360 (XInput-native)");
                             ui.selectable_value(&mut pt, PadType::DualShock4, "DualShock 4 (distinct from a real Xbox stick)");
                         });
                 })
                 .response
-                .on_hover_text("Pick DualShock 4 if your real stick is an Xbox pad — Steam shows it as a separate \"Wireless Controller\" so you can select the right one. Xbox 360 is needed for raw-XInput games outside Steam.");
+                .on_hover_text("NOBD Controller is a native, branded HID pad (needs a one-time setup). DualShock 4 / Xbox 360 use ViGEm — pick DS4 if your real stick is an Xbox pad so Steam can tell them apart; Xbox 360 for raw-XInput games outside Steam.");
                 if pt != self.pad_type {
                     self.pad_type = pt;
                     self.sync_service = crate::sync_service::SyncService::start(pt);
                     self.persist_ui();
+                }
+
+                // NOBD Controller (native) needs a one-time elevated setup: install
+                // the driver + create the branded device. After that the login task
+                // keeps the app elevated so there are no more prompts.
+                if self.pad_type == PadType::NobdNative && !crate::nobd_setup::is_ready() {
+                    ui.horizontal(|ui| {
+                        ui.colored_label(YELLOW, "\u{25CF}");
+                        if crate::nobd_setup::is_elevated() {
+                            if ui.button("Enable NOBD Controller").clicked() {
+                                if crate::nobd_setup::run_setup().is_ok() {
+                                    self.sync_service =
+                                        crate::sync_service::SyncService::start(self.pad_type);
+                                }
+                            }
+                            ui.label(
+                                RichText::new("One-time: installs the NOBD driver + device.")
+                                    .size(11.0)
+                                    .color(Color32::GRAY),
+                            );
+                        } else {
+                            if ui.button("Enable NOBD Controller (admin)").clicked() {
+                                if crate::nobd_setup::relaunch_elevated_for_setup().is_ok() {
+                                    std::process::exit(0);
+                                }
+                            }
+                            ui.label(
+                                RichText::new("Restarts elevated for a one-time setup.")
+                                    .size(11.0)
+                                    .color(Color32::GRAY),
+                            );
+                        }
+                    });
                 }
             }
         });
@@ -520,6 +555,7 @@ fn draw_nobd_sync(
     let steam_name = match pad {
         PadType::Xbox360 => "XInput Controller (#N)",
         PadType::DualShock4 => "Wireless Controller (DualShock 4)",
+        PadType::NobdNative => "NOBD Controller",
     };
 
     egui::CentralPanel::default().show(ctx, |ui| {
@@ -534,6 +570,9 @@ fn draw_nobd_sync(
             } else if err == crate::sync_service::ERR_NO_XINPUT {
                 ui.colored_label(RED, "\u{25CF}");
                 ui.label(RichText::new("XInput unavailable").color(RED));
+            } else if err == crate::sync_service::ERR_NO_NOBD {
+                ui.colored_label(RED, "\u{25CF}");
+                ui.label(RichText::new("NOBD Controller not set up — click Enable above").color(RED));
             } else if sync.is_active() {
                 ui.colored_label(GREEN, "\u{25CF}");
                 ui.label(RichText::new("ACTIVE — virtual NOBD pad is live").color(GREEN));
@@ -797,6 +836,7 @@ fn draw_gap_tester(&self, ctx: &egui::Context) {
         let nobd_pad_name = match self.pad_type {
             PadType::Xbox360 => "XInput Controller",
             PadType::DualShock4 => "Wireless Controller",
+            PadType::NobdNative => "NOBD Controller",
         };
 
         ui.add_space(4.0);

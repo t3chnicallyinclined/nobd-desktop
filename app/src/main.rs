@@ -6,6 +6,7 @@ mod hid;
 mod input;
 mod logo;
 mod monitor;
+mod nobd_setup;
 mod persist;
 mod stats;
 mod sync_service;
@@ -23,6 +24,13 @@ fn configure_style(ctx: &egui::Context) {
 }
 
 fn main() -> eframe::Result {
+    // Relaunched elevated for one-time NOBD Controller setup: install the driver
+    // + create the device before the GUI comes up, then continue as the (now
+    // elevated) app. Best-effort; the UI reflects success/failure.
+    if std::env::args().any(|a| a == "--setup") && nobd_setup::is_elevated() {
+        let _ = nobd_setup::run_setup();
+    }
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([820.0, 640.0])

@@ -34,6 +34,8 @@ const NOBD_PID: u16 = 0x4E42;
 pub const ERR_NONE: u8 = 0;
 pub const ERR_NO_XINPUT: u8 = 1;
 pub const ERR_NO_VIGEM: u8 = 2;
+/// NobdNative backend couldn't open its device (not set up, or not elevated).
+pub const ERR_NO_NOBD: u8 = 3;
 
 /// Is the ViGEmBus driver installed + reachable? (Cheap connect probe.)
 pub fn vigem_present() -> bool {
@@ -47,24 +49,34 @@ pub fn vigem_present() -> bool {
 pub enum PadType {
     Xbox360,
     DualShock4,
+    /// Native "NOBD Controller" HID device via the pure-Rust hm-native client
+    /// (branded, no ViGEm). Requires one-time elevated setup.
+    NobdNative,
 }
 
 impl PadType {
     pub fn from_u32(n: u32) -> Self {
-        if n == 1 { PadType::DualShock4 } else { PadType::Xbox360 }
+        match n {
+            1 => PadType::DualShock4,
+            2 => PadType::NobdNative,
+            _ => PadType::Xbox360,
+        }
     }
     pub fn as_u32(self) -> u32 {
         match self {
             PadType::Xbox360 => 0,
             PadType::DualShock4 => 1,
+            PadType::NobdNative => 2,
         }
     }
 }
 
-/// Either virtual-pad target, so the loop can drive whichever was plugged.
+/// Whichever virtual-pad target the loop drives.
 enum Target {
     X(vigem_client::Xbox360Wired<vigem_client::Client>),
     D(vigem_client::DualShock4Wired<vigem_client::Client>),
+    /// Native NOBD HID device (pure-Rust hm-native client).
+    H(hm_native::NobdController),
 }
 
 /// Translate a grouped XInput button mask (+ analog) into a DS4 HID report.
@@ -260,34 +272,53 @@ fn run(stop: Arc<AtomicBool>, status: Arc<SyncStatus>, pad: PadType) {
     // new slot the virtual pad lands on (Xbox 360 pad type only).
     let before: Vec<u32> = (0..4).filter(|&s| xinput_state(xi, s).is_some()).collect();
 
-    let client = match vigem_client::Client::connect() {
-        Ok(c) => c,
-        Err(_) => {
-            status.error.store(ERR_NO_VIGEM, Ordering::Relaxed);
-            return;
-        }
-    };
     let mut target = match pad {
-        PadType::Xbox360 => {
-            // Custom VID/PID (not the genuine Xbox 045E/028E) so it's distinguishable
-            // from a real Xbox stick — still XInput thanks to ViGEm's MS_COMP_XUSB10.
-            let id = vigem_client::TargetId { vendor: NOBD_VID, product: NOBD_PID };
-            let mut t = vigem_client::Xbox360Wired::new(client, id);
-            if t.plugin().is_err() {
-                status.error.store(ERR_NO_VIGEM, Ordering::Relaxed);
-                return;
+        PadType::Xbox360 | PadType::DualShock4 => {
+            let client = match vigem_client::Client::connect() {
+                Ok(c) => c,
+                Err(_) => {
+                    status.error.store(ERR_NO_VIGEM, Ordering::Relaxed);
+                    return;
+                }
+            };
+            match pad {
+                PadType::Xbox360 => {
+                    // Custom VID/PID (not the genuine Xbox 045E/028E) so it's distinguishable
+                    // from a real Xbox stick — still XInput thanks to ViGEm's MS_COMP_XUSB10.
+                    let id = vigem_client::TargetId { vendor: NOBD_VID, product: NOBD_PID };
+                    let mut t = vigem_client::Xbox360Wired::new(client, id);
+                    if t.plugin().is_err() {
+                        status.error.store(ERR_NO_VIGEM, Ordering::Relaxed);
+                        return;
+                    }
+                    let _ = t.wait_ready();
+                    Target::X(t)
+                }
+                _ => {
+                    let mut t = vigem_client::DualShock4Wired::new(
+                        client,
+                        vigem_client::TargetId::DUALSHOCK4_WIRED,
+                    );
+                    if t.plugin().is_err() {
+                        status.error.store(ERR_NO_VIGEM, Ordering::Relaxed);
+                        return;
+                    }
+                    let _ = t.wait_ready();
+                    Target::D(t)
+                }
             }
-            let _ = t.wait_ready();
-            Target::X(t)
         }
-        PadType::DualShock4 => {
-            let mut t = vigem_client::DualShock4Wired::new(client, vigem_client::TargetId::DUALSHOCK4_WIRED);
-            if t.plugin().is_err() {
-                status.error.store(ERR_NO_VIGEM, Ordering::Relaxed);
-                return;
+        PadType::NobdNative => {
+            // Native "NOBD Controller" HID device via the pure-Rust hm-native
+            // client. Requires the one-time elevated setup + an elevated process
+            // (to create the Global\ section). No ViGEm.
+            match hm_native::NobdController::open() {
+                Ok(c) => Target::H(c),
+                Err(_) => {
+                    status.error.store(ERR_NO_NOBD, Ordering::Relaxed);
+                    return;
+                }
             }
-            let _ = t.wait_ready();
-            Target::D(t)
         }
     };
 
@@ -335,6 +366,14 @@ fn run(stop: Arc<AtomicBool>, status: Arc<SyncStatus>, pad: PadType) {
                         gp.sThumbLX, gp.sThumbLY, gp.sThumbRX, gp.sThumbRY,
                     );
                     let _ = t.update(&r);
+                }
+                Target::H(c) => {
+                    // hm-native packs XInput-style buttons + our stick/triggers
+                    // into the NOBD HID report. (Our descriptor uses the left
+                    // stick; triggers map to buttons 7/8.)
+                    c.submit(
+                        grouped, gp.bLeftTrigger, gp.bRightTrigger, gp.sThumbLX, gp.sThumbLY,
+                    );
                 }
             }
         } else {
