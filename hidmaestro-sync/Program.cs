@@ -73,25 +73,30 @@ internal static class Program
     private const uint SHM_MAGIC = 0x4E424433; // "NBD3"
     private const long SHM_SIZE = 4096;
 
+    private static volatile bool _running = true;
+
     private static int Main(string[] args)
     {
         if (args.Contains("--selftest")) return SelfTest.Run();
 
-        string profileId = ArgValue(args, "--profile") ?? "xbox-360-wired";
+        string? profileArg = ArgValue(args, "--profile");
         uint fallbackWindow = uint.TryParse(ArgValue(args, "--window"), out var w) ? Math.Clamp(w, 1, 16) : 5;
 
         if (!IsElevated())
-            Console.WriteLine("WARNING: not elevated. InstallDriver()/CreateController() need admin — " +
-                              "run this from an elevated terminal or expect it to fail.");
+            Console.WriteLine("WARNING: not elevated. InstallDriver()/CreateController()/OEM-name branding " +
+                              "need admin — run this from an elevated terminal or expect it to fail.");
 
         if (args.Contains("--latency"))
         {
+            // The latency harness reads via XInputGetState, so it only measures
+            // the XInput/XUSB path. Default to xbox-360-wired for the A/B vs ViGEm.
             int iters = 400;
             foreach (var a in args) if (int.TryParse(a, out var n) && n >= 100) iters = n;
-            return Latency(profileId, iters);
+            return Latency(profileArg ?? "xbox-360-wired", iters);
         }
 
-        return RunSync(profileId, fallbackWindow);
+        // Default: the native branded "NOBD" HID stick.
+        return RunSync(profileArg ?? "nobd", fallbackWindow);
     }
 
     // ── The real thing: real pad -> sync -> HIDMaestro pad ───────────────────
@@ -116,18 +121,45 @@ internal static class Program
         Console.WriteLine($"Real controller found on XInput slot {realSlot}.");
 
         using var ctx = new HMContext();
+        // Restore any joy.cpl OEM-name overrides stranded by a prior crash.
+        int recovered = HMOemNameOverride.RecoverOrphans();
+        if (recovered > 0) Console.WriteLine($"Recovered {recovered} orphaned OEM-name override(s).");
         int loaded = ctx.LoadDefaultProfiles();
         Console.WriteLine($"Loaded {loaded} HIDMaestro profiles.");
         Console.Write("Installing HIDMaestro driver (idempotent)… ");
         ctx.InstallDriver();
         Console.WriteLine("OK");
 
-        var profile = ctx.GetProfile(profileId);
+        // Resolve the profile: "nobd" = our native branded HID stick; anything
+        // else = a catalog profile (e.g. xbox-360-wired) for comparison.
+        bool nobd = profileId.Equals("nobd", StringComparison.OrdinalIgnoreCase);
+        HMProfile? profile = nobd ? NobdProfile.Build() : ctx.GetProfile(profileId);
         if (profile == null) { Console.Error.WriteLine($"Profile '{profileId}' not found."); return 1; }
         Console.Write($"Creating virtual controller ({profile.Name})… ");
         using var ctrl = ctx.CreateController(profile);
         Console.WriteLine("OK");
-        Console.WriteLine("Reading real pad -> syncing -> HIDMaestro pad. Ctrl+C to stop.");
+
+        // Brand it: force the joy.cpl / DirectInput label to "NOBD" across all
+        // three OEM registry tables (the USB product string alone won't rename
+        // the "Game Controllers" entry). Paired with Clear() on exit below.
+        bool branded = false;
+        if (nobd)
+        {
+            try
+            {
+                HMOemNameOverride.Set(profile.VendorId, profile.ProductId, NobdProfile.Label);
+                branded = true;
+                Console.WriteLine($"Branded VID_{profile.VendorId:X4}&PID_{profile.ProductId:X4} as \"{NobdProfile.Label}\" in joy.cpl.");
+            }
+            catch (Exception e)
+            {
+                Console.WriteLine($"(OEM-name branding skipped: {e.Message} — need admin)");
+            }
+        }
+
+        // Clean up the brand on Ctrl+C so we don't strand the override.
+        Console.CancelKeyPress += (_, e) => { e.Cancel = true; _running = false; };
+        Console.WriteLine("Reading real pad -> syncing -> NOBD pad. Ctrl+C to stop.");
 
         var shm = OpenSharedState();
         var sync = new SyncWindow();
@@ -137,7 +169,7 @@ internal static class Program
         var lastLog = Stopwatch.StartNew();
         var axes = HMGamepadStateHelpers.StandardAxes(profile); // reused; only Buttons/axes values change
 
-        while (true)
+        while (_running)
         {
             ulong nowUs = (ulong)(epoch.Elapsed.Ticks * 1_000_000L / Stopwatch.Frequency);
 
@@ -189,6 +221,14 @@ internal static class Program
 
             Thread.Sleep(1); // ~1 kHz
         }
+
+        if (branded)
+        {
+            HMOemNameOverride.Clear(profile.VendorId, profile.ProductId);
+            Console.WriteLine("Restored the prior joy.cpl label.");
+        }
+        Console.WriteLine("Stopped.");
+        return 0;
     }
 
     // ── Latency: SubmitState -> XInputGetState round trip (matches vigem) ─────
