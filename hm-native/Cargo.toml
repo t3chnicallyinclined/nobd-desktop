@@ -1,0 +1,18 @@
+[package]
+name = "hm-native"
+version = "0.1.0"
+edition = "2021"
+description = "Pure-Rust client for the vendored HIDMaestro UMDF2 driver — device create + report submit + OEM branding, no .NET runtime."
+
+[lib]
+name = "hm_native"
+path = "src/lib.rs"
+
+[dependencies]
+windows-sys = { version = "0.52", features = [
+    "Win32_Foundation",
+    "Win32_System_Memory",
+    "Win32_System_Threading",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+] }
