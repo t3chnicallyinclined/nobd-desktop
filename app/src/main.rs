@@ -24,6 +24,16 @@ fn configure_style(ctx: &egui::Context) {
 }
 
 fn main() -> eframe::Result {
+    // Panic hook: a windows-subsystem app has no stderr, and abort-panics bypass
+    // it anyway — write the panic (with backtrace) to a file so crashes are
+    // diagnosable. TEMP\nobd-panic.txt.
+    std::panic::set_hook(Box::new(|info| {
+        let bt = std::backtrace::Backtrace::force_capture();
+        let msg = format!("{info}\n\nbacktrace:\n{bt}\n");
+        let path = std::env::temp_dir().join("nobd-panic.txt");
+        let _ = std::fs::write(&path, msg);
+    }));
+
     // Relaunched elevated for one-time NOBD Controller setup: install the driver
     // + create the device before the GUI comes up, then continue as the (now
     // elevated) app. Best-effort; the UI reflects success/failure.
@@ -46,7 +56,7 @@ fn main() -> eframe::Result {
                 height: 256,
             }))
             // Start hidden — the app lives in the tray; left-click the icon to open.
-            .with_visible(false),
+            .with_visible(std::env::var("NOBD_DEBUG_SHOW").is_ok()),
         ..Default::default()
     };
 
