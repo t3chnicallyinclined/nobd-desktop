@@ -14,9 +14,13 @@
 
 pub mod controller;
 pub mod device;
+pub mod gip;
 pub mod install;
 pub mod oem;
 pub mod report;
 pub mod shared;
+pub mod swdevice;
 
-pub use controller::{setup, NobdController, NOBD_LABEL, NOBD_PID, NOBD_VID};
+pub use controller::{
+    setup_hid, setup_xinput, NobdController, PadMode, NOBD_LABEL, NOBD_PID, NOBD_VID,
+};

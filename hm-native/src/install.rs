@@ -25,11 +25,33 @@ pub fn install_driver(cert_path: &str, inf_path: &str) -> io::Result<()> {
     let _ = Command::new("pnputil")
         .args(["/add-driver", inf_path, "/install"])
         .status()?;
-    if driver_installed() {
+    let inf_name = std::path::Path::new(inf_path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("hidmaestro.inf");
+    if package_installed(inf_name) {
         Ok(())
     } else {
         Err(io::Error::other("pnputil /add-driver did not populate the DriverStore"))
     }
+}
+
+/// True if a driver package for `inf_name` (e.g. "hidmaestro.inf" or
+/// "hidmaestro_xusb.inf") is present in the DriverStore.
+pub fn package_installed(inf_name: &str) -> bool {
+    let prefix = format!("{}_amd64_", inf_name.to_ascii_lowercase());
+    let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+    let repo = format!(r"{root}\System32\DriverStore\FileRepository");
+    std::fs::read_dir(repo)
+        .map(|rd| {
+            rd.flatten().any(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .to_ascii_lowercase()
+                    .starts_with(&prefix)
+            })
+        })
+        .unwrap_or(false)
 }
 
 /// True if a `hidmaestro.inf` package is present in the DriverStore — the

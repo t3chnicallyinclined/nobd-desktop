@@ -34,6 +34,7 @@ pub const SHARED_INPUT_SIZE: usize = 362;
 const OFF_SEQ: usize = 0; // u32 volatile seqlock
 const OFF_DATA_SIZE: usize = 4; // u32
 const OFF_DATA: usize = 8; // [u8; 256]
+const OFF_GIP: usize = 264; // [u8; 14] — XUSB/XInput companion reads only this
 const OFF_EXT_SIZE: usize = 278; // u32 — must be cleared to 0 every frame
 
 /// Permissive DACL so the LocalService WUDFHost can open the section/event.
@@ -159,6 +160,30 @@ impl InputChannel {
 
             fence(Ordering::SeqCst);
             let done = pending.wrapping_add(1); // even — publish
+            seq_ptr.write_volatile(done);
+            self.seq = done;
+        }
+        if self.event != 0 {
+            unsafe { SetEvent(self.event) };
+        }
+    }
+
+    /// Seqlock-write the 14-byte GIP buffer (XUSB/XInput companion path) and
+    /// signal. The companion reads only `GipData[14]`, so `Data[256]` is left
+    /// untouched.
+    pub fn submit_gip(&mut self, gip: &[u8; 14]) {
+        unsafe {
+            let seq_ptr = self.base.add(OFF_SEQ) as *mut u32;
+
+            let pending = self.seq.wrapping_add(1);
+            seq_ptr.write_volatile(pending);
+            fence(Ordering::SeqCst);
+
+            core::ptr::copy_nonoverlapping(gip.as_ptr(), self.base.add(OFF_GIP), gip.len());
+            (self.base.add(OFF_EXT_SIZE) as *mut u32).write_volatile(0);
+
+            fence(Ordering::SeqCst);
+            let done = pending.wrapping_add(1);
             seq_ptr.write_volatile(done);
             self.seq = done;
         }

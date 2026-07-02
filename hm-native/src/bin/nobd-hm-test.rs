@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::sleep;
 use std::time::Duration;
 
-use hm_native::{install, setup, NobdController};
+use hm_native::{install, setup_hid, NobdController, PadMode};
 use windows_sys::Win32::Foundation::BOOL;
 use windows_sys::Win32::System::Console::SetConsoleCtrlHandler;
 
@@ -43,10 +43,10 @@ fn main() {
     println!("Installing our VENDORED bundle + creating the NOBD device (pure Rust)…");
     println!("  cert: {cer}");
     println!("  inf:  {inf}");
-    let iid = setup(&cer, &inf).expect("setup (needs elevation)");
+    let iid = setup_hid(&cer, &inf).expect("setup (needs elevation)");
     println!("Setup OK — device instance: {iid}");
 
-    let mut ctrl = NobdController::open().expect("open shared channel");
+    let mut ctrl = NobdController::open(PadMode::Hid).expect("open shared channel");
     println!("event signalling: {}", ctrl.has_event());
     println!();
     println!("-> joy.cpl should show ONE \"NOBD Controller\".");
@@ -59,13 +59,13 @@ fn main() {
     while !STOP.load(Ordering::Relaxed) {
         let a = if (tick / 30) % 2 == 0 { A } else { 0 };
         let hat = DPAD[((tick / 15) % 4) as usize];
-        ctrl.submit(a | hat, 0, 0, 0, 0);
+        ctrl.submit(a | hat, 0, 0, 0, 0, 0, 0);
         sleep(Duration::from_millis(33));
         tick += 1;
     }
 
     // Release everything (neutral frame) so we never leave a stuck input.
-    ctrl.submit(0, 0, 0, 0, 0);
+    ctrl.submit(0, 0, 0, 0, 0, 0, 0);
     sleep(Duration::from_millis(20));
     println!("\nreleased all inputs — exiting.");
 }
