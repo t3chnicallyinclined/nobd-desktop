@@ -9,10 +9,12 @@ name = "hm_native"
 path = "src/lib.rs"
 
 [dependencies]
+winreg = "0.52"
 windows-sys = { version = "0.52", features = [
     "Win32_Foundation",
     "Win32_System_Memory",
     "Win32_System_Threading",
     "Win32_Security",
     "Win32_Security_Authorization",
+    "Win32_Devices_DeviceAndDriverInstallation",
 ] }

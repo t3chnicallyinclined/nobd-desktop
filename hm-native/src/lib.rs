@@ -12,5 +12,11 @@
 //!   3. `install` (TODO) — cert import + `pnputil` against the vendored bundle.
 //!   4. `oem` (TODO) — the three joy.cpl OEM-name registry tables.
 
+pub mod controller;
+pub mod device;
+pub mod install;
+pub mod oem;
 pub mod report;
 pub mod shared;
+
+pub use controller::{setup, NobdController, NOBD_LABEL, NOBD_PID, NOBD_VID};
