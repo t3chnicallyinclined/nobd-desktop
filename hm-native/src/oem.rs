@@ -10,7 +10,7 @@
 
 use std::io;
 
-use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
+use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_WRITE};
 use winreg::RegKey;
 
 const DINPUT: &str =
@@ -29,16 +29,19 @@ pub fn set_oem_name(vid: u16, pid: u16, label: &str) -> io::Result<()> {
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
     let label = label.to_string();
 
+    // KEY_WRITE only — these protected MediaProperties keys deny the default
+    // KEY_ALL_ACCESS (which asks for WRITE_DAC/ownership) even to admins.
+
     // 1. DirectInput OEM table — value name has a space: "OEM Name".
-    let (k1, _) = hklm.create_subkey(format!(r"{DINPUT}\{vp}\OEM"))?;
+    let (k1, _) = hklm.create_subkey_with_flags(format!(r"{DINPUT}\{vp}\OEM"), KEY_WRITE)?;
     k1.set_value("OEM Name", &label)?;
 
     // 2. Joystick OEM table (HKLM) — value name "OEMName" (no space).
-    let (k2, _) = hklm.create_subkey(format!(r"{JOYSTICK}\{vp}"))?;
+    let (k2, _) = hklm.create_subkey_with_flags(format!(r"{JOYSTICK}\{vp}"), KEY_WRITE)?;
     k2.set_value("OEMName", &label)?;
 
     // 3. Joystick OEM table (HKCU) — wins for joy.cpl display.
-    let (k3, _) = hkcu.create_subkey(format!(r"{JOYSTICK}\{vp}"))?;
+    let (k3, _) = hkcu.create_subkey_with_flags(format!(r"{JOYSTICK}\{vp}"), KEY_WRITE)?;
     k3.set_value("OEMName", &label)?;
     Ok(())
 }

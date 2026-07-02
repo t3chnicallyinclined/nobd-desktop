@@ -39,7 +39,12 @@ fn main() {
     println!("  instance: {iid}");
 
     println!("Branding joy.cpl name -> \"{NOBD_LABEL}\"…");
-    oem::set_oem_name(NOBD_VID, NOBD_PID, NOBD_LABEL).expect("set_oem_name");
+    match oem::set_oem_name(NOBD_VID, NOBD_PID, NOBD_LABEL) {
+        Ok(()) => println!("  branded."),
+        // Non-fatal: the driver also sets BusReportedDeviceDesc from our
+        // ProductString, so the device still shows as "NOBD Controller".
+        Err(e) => println!("  (OEM branding failed: {e} — continuing; driver name still applies)"),
+    }
 
     let mut ctrl = NobdController::open().expect("open shared channel");
     println!("event signalling: {}", ctrl.has_event());
