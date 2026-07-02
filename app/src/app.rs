@@ -460,32 +460,12 @@ impl eframe::App for FingerGapApp {
                 });
             }
 
-            // NOBD Controller mode (System-wide sync tab only): the native pad is
-            // the only backend; the choice is just how it presents to games.
+            // System-wide sync tab: the NOBD Controller is the automatic synced
+            // output — the user just deals with sync + their stock stick. The
+            // device *type* is an Advanced detail, defaulting to the branded
+            // "NOBD Controller" (HID).
             if self.active_tab == Tab::NobdSync {
-                let mut pt = self.pad_type;
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("NOBD Controller").size(12.0).color(Color32::GRAY));
-                    egui::ComboBox::from_id_salt("pad_type")
-                        .selected_text(match pt {
-                            PadType::Hid => "Branded (Steam / DInput)",
-                            PadType::Xinput => "XInput (MvC2)",
-                        })
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut pt, PadType::Hid, "Branded — \"NOBD Controller\" in Steam / joy.cpl");
-                            ui.selectable_value(&mut pt, PadType::Xinput, "XInput — for raw-XInput games (MvC2)");
-                        });
-                })
-                .response
-                .on_hover_text("Branded mode shows as \"NOBD Controller\" in Steam / joy.cpl / DirectInput games. XInput mode presents as an Xbox 360 pad for games that only read XInput (e.g. MvC2). Both are the native NOBD Controller — no ViGEm.");
-                if pt != self.pad_type {
-                    self.pad_type = pt;
-                    self.sync_service = crate::sync_service::SyncService::start(pt);
-                    self.persist_ui();
-                }
-
-                // One-time elevated setup for the selected mode. After it, the
-                // login task keeps the app elevated so there are no more prompts.
+                // One-time setup (visible until the NOBD Controller is ready).
                 if !crate::nobd_setup::is_ready(self.pad_type) {
                     ui.horizontal(|ui| {
                         ui.colored_label(YELLOW, "\u{25CF}");
@@ -497,7 +477,7 @@ impl eframe::App for FingerGapApp {
                                 }
                             }
                             ui.label(
-                                RichText::new("One-time: installs the NOBD driver + device.")
+                                RichText::new("One-time: installs the NOBD Controller.")
                                     .size(11.0)
                                     .color(Color32::GRAY),
                             );
@@ -507,6 +487,26 @@ impl eframe::App for FingerGapApp {
                             }
                         }
                     });
+                }
+
+                // Game-compatibility mode — tucked away; most users never open it.
+                let mut pt = self.pad_type;
+                ui.collapsing(
+                    RichText::new("Advanced \u{2014} game compatibility").size(12.0).color(Color32::GRAY),
+                    |ui| {
+                        ui.radio_value(&mut pt, PadType::Hid, "NOBD Controller (Steam / DirectInput games)");
+                        ui.radio_value(&mut pt, PadType::Xinput, "Xbox pad (for XInput-only games, e.g. MvC2)");
+                        ui.label(
+                            RichText::new("Switching re-creates the device — click Enable once for the new mode.")
+                                .size(11.0)
+                                .color(Color32::GRAY),
+                        );
+                    },
+                );
+                if pt != self.pad_type {
+                    self.pad_type = pt;
+                    self.sync_service = crate::sync_service::SyncService::start(pt);
+                    self.persist_ui();
                 }
             }
         });
