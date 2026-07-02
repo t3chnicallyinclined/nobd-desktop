@@ -17,8 +17,10 @@ use winreg::{RegKey, RegValue};
 use windows_sys::core::GUID;
 use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
     SetupDiCallClassInstaller, SetupDiCreateDeviceInfoList, SetupDiCreateDeviceInfoW,
-    SetupDiDestroyDeviceInfoList, SetupDiGetDeviceInstanceIdW, SetupDiSetDeviceRegistryPropertyW,
-    UpdateDriverForPlugAndPlayDevicesW, HDEVINFO, SP_DEVINFO_DATA,
+    SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInfo, SetupDiGetClassDevsW,
+    SetupDiGetDeviceInstanceIdW, SetupDiGetDeviceRegistryPropertyW,
+    SetupDiSetDeviceRegistryPropertyW, UpdateDriverForPlugAndPlayDevicesW, HDEVINFO,
+    SP_DEVINFO_DATA,
 };
 
 use crate::report::REPORT_DESCRIPTOR;
@@ -35,6 +37,8 @@ const GUID_DEVCLASS_HIDCLASS: GUID = GUID {
 const DICD_GENERATE_ID: u32 = 0x0000_0001;
 const SPDRP_HARDWAREID: u32 = 0x0000_0001;
 const DIF_REGISTERDEVICE: u32 = 0x0000_0019;
+const DIF_REMOVE: u32 = 0x0000_0005;
+const DIGCF_PRESENT: u32 = 0x0000_0002;
 
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -74,6 +78,52 @@ impl Drop for DevInfoList {
     }
 }
 
+/// Remove every existing devnode whose hardware id matches ours. Idempotency:
+/// setup / re-install converges to exactly one NOBD device instead of stacking
+/// a new one each run. Returns how many were removed.
+pub fn remove_devices(vid: u16, pid: u16) -> u32 {
+    let hwid = format!("root\\vid_{vid:04x}&pid_{pid:04x}");
+    let mut removed = 0u32;
+    unsafe {
+        let dis = SetupDiGetClassDevsW(&GUID_DEVCLASS_HIDCLASS, std::ptr::null(), 0, DIGCF_PRESENT);
+        if dis as isize == -1 {
+            return 0;
+        }
+        let _list = DevInfoList(dis);
+
+        let mut idx = 0u32;
+        loop {
+            let mut dev: SP_DEVINFO_DATA = std::mem::zeroed();
+            dev.cbSize = std::mem::size_of::<SP_DEVINFO_DATA>() as u32;
+            if SetupDiEnumDeviceInfo(dis, idx, &mut dev) == 0 {
+                break; // no more devices
+            }
+            idx += 1;
+
+            let mut buf = [0u16; 512];
+            let mut req = 0u32;
+            let ok = SetupDiGetDeviceRegistryPropertyW(
+                dis,
+                &mut dev,
+                SPDRP_HARDWAREID,
+                std::ptr::null_mut(),
+                buf.as_mut_ptr() as *mut u8,
+                (buf.len() * 2) as u32,
+                &mut req,
+            );
+            if ok == 0 {
+                continue;
+            }
+            // Multi-sz of hardware ids; a substring match on our id is enough.
+            let ids = String::from_utf16_lossy(&buf).to_ascii_lowercase();
+            if ids.contains(&hwid) && SetupDiCallClassInstaller(DIF_REMOVE, dis, &mut dev) != 0 {
+                removed += 1;
+            }
+        }
+    }
+    removed
+}
+
 /// Create the ROOT\HIDClass devnode for our NOBD gamepad, tag it with
 /// `ControllerIndex`, and bind the vendored driver (`inf_path`). Returns the
 /// device instance id (e.g. `ROOT\HIDCLASS\0000`). Requires admin.
@@ -84,6 +134,12 @@ pub fn create_device(
     description: &str,
     inf_path: &str,
 ) -> io::Result<String> {
+    // Idempotency: clear any prior NOBD devnodes so we never stack duplicates.
+    let n = remove_devices(vid, pid);
+    if n > 0 {
+        eprintln!("removed {n} existing NOBD devnode(s) before creating a fresh one");
+    }
+
     let hwid = format!("root\\VID_{vid:04X}&PID_{pid:04X}");
 
     // Multi-sz HardwareID: "<hwid>\0root\HIDMaestro\0\0"
