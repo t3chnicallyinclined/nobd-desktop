@@ -53,6 +53,7 @@ pub fn setup_hid(cert_path: &str, inf_path: &str) -> io::Result<String> {
     let instance_id =
         device::create_device(NOBD_INDEX, NOBD_VID, NOBD_PID, NOBD_LABEL, inf_path)?;
     oem::set_oem_name(NOBD_VID, NOBD_PID, NOBD_LABEL)?;
+    let _ = device::set_friendly_name(&instance_id, NOBD_LABEL);
     Ok(instance_id)
 }
 
@@ -68,6 +69,9 @@ pub fn setup_xinput(cert_path: &str, xusb_inf_path: &str) -> io::Result<String> 
     let suffix = swdevice::unique_suffix(NOBD_INDEX);
     let instance_id =
         swdevice::create_companion(NOBD_INDEX, XUSB_VID, XUSB_PID, &suffix, NOBD_LABEL)?;
+    // Per-instance FriendlyName so Device Manager reads "NOBD Controller" (not
+    // the Xbox default), without touching real Xbox pads on the same VID/PID.
+    let _ = device::set_friendly_name(&instance_id, NOBD_LABEL);
     Ok(instance_id)
 }
 

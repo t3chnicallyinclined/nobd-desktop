@@ -18,7 +18,7 @@ use windows_sys::core::GUID;
 use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
     SetupDiCallClassInstaller, SetupDiCreateDeviceInfoList, SetupDiCreateDeviceInfoW,
     SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInfo, SetupDiGetClassDevsW,
-    SetupDiGetDeviceInstanceIdW, SetupDiGetDeviceRegistryPropertyW,
+    SetupDiGetDeviceInstanceIdW, SetupDiGetDeviceRegistryPropertyW, SetupDiOpenDeviceInfoW,
     SetupDiSetDeviceRegistryPropertyW, UpdateDriverForPlugAndPlayDevicesW, HDEVINFO,
     SP_DEVINFO_DATA,
 };
@@ -39,6 +39,7 @@ const SPDRP_HARDWAREID: u32 = 0x0000_0001;
 const DIF_REGISTERDEVICE: u32 = 0x0000_0019;
 const DIF_REMOVE: u32 = 0x0000_0005;
 const DIGCF_ALLCLASSES: u32 = 0x0000_0004;
+const SPDRP_FRIENDLYNAME: u32 = 0x0000_000C;
 
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -124,6 +125,36 @@ pub fn remove_devices(vid: u16, pid: u16) -> u32 {
         }
     }
     removed
+}
+
+/// Set the per-instance Device Manager FriendlyName (e.g. "NOBD Controller").
+/// Per-instance, so it never collides with other devices sharing the VID/PID
+/// (unlike the OEM name). Best-effort.
+pub fn set_friendly_name(instance_id: &str, name: &str) -> bool {
+    unsafe {
+        let dis = SetupDiCreateDeviceInfoList(std::ptr::null(), 0);
+        if dis as isize == -1 {
+            return false;
+        }
+        let _list = DevInfoList(dis);
+
+        let iid = wide(instance_id);
+        let mut dev: SP_DEVINFO_DATA = std::mem::zeroed();
+        dev.cbSize = std::mem::size_of::<SP_DEVINFO_DATA>() as u32;
+        if SetupDiOpenDeviceInfoW(dis, iid.as_ptr(), 0, 0, &mut dev) == 0 {
+            return false;
+        }
+
+        let name_w = wide(name);
+        let bytes = (name_w.len() * 2) as u32;
+        SetupDiSetDeviceRegistryPropertyW(
+            dis,
+            &mut dev,
+            SPDRP_FRIENDLYNAME,
+            name_w.as_ptr() as *const u8,
+            bytes,
+        ) != 0
+    }
 }
 
 /// Remove every devnode (ANY class) whose hardware-id list contains `needle`
