@@ -11,10 +11,20 @@
 //! pure Rust driving a vendored driver. Zero .NET anywhere.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::sleep;
 use std::time::Duration;
 
 use hm_native::{install, setup, NobdController};
+use windows_sys::Win32::Foundation::BOOL;
+use windows_sys::Win32::System::Console::SetConsoleCtrlHandler;
+
+static STOP: AtomicBool = AtomicBool::new(false);
+
+unsafe extern "system" fn on_ctrl_c(_ctrl_type: u32) -> BOOL {
+    STOP.store(true, Ordering::SeqCst);
+    1 // TRUE — handled; don't hard-kill, let main release inputs cleanly
+}
 
 fn main() {
     let dir = concat!(env!("CARGO_MANIFEST_DIR"), r"\driver");
@@ -40,16 +50,22 @@ fn main() {
     println!("event signalling: {}", ctrl.has_event());
     println!();
     println!("-> joy.cpl should show ONE \"NOBD Controller\".");
-    println!("-> A toggles ~1 Hz, hat rotates. Ctrl+C to stop.");
+    println!("-> A toggles ~1 Hz, hat rotates. Ctrl+C to stop (releases all inputs).");
+    unsafe { SetConsoleCtrlHandler(Some(on_ctrl_c), 1) };
 
     const A: u16 = 0x1000;
     const DPAD: [u16; 4] = [0x0001, 0x0008, 0x0002, 0x0004]; // Up, Right, Down, Left
     let mut tick: u32 = 0;
-    loop {
+    while !STOP.load(Ordering::Relaxed) {
         let a = if (tick / 30) % 2 == 0 { A } else { 0 };
         let hat = DPAD[((tick / 15) % 4) as usize];
         ctrl.submit(a | hat, 0, 0, 0, 0);
         sleep(Duration::from_millis(33));
         tick += 1;
     }
+
+    // Release everything (neutral frame) so we never leave a stuck input.
+    ctrl.submit(0, 0, 0, 0, 0);
+    sleep(Duration::from_millis(20));
+    println!("\nreleased all inputs — exiting.");
 }

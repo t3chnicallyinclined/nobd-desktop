@@ -17,4 +17,5 @@ windows-sys = { version = "0.52", features = [
     "Win32_Security",
     "Win32_Security_Authorization",
     "Win32_Devices_DeviceAndDriverInstallation",
+    "Win32_System_Console",
 ] }
