@@ -953,6 +953,40 @@ fn draw_gap_tester(&self, ctx: &egui::Context) {
                 &format!("{} / {}", stats.simulated_split_count(), stats.count()));
             draw_stat(ui, "Samples (window)", &format!("{} / {}", stats.count(), stats.window()));
 
+            // ── Your stick (raw) vs the synced NOBD Controller ──────────────
+            // Same chords you just pressed, run through the NOBD sync window:
+            // any chord within the window lands on one frame; only wider gaps
+            // can still split. This IS what the NOBD Controller delivers.
+            let win_ms = nobd_shared::state()
+                .window_ms[0]
+                .load(std::sync::atomic::Ordering::Relaxed)
+                .clamp(1, 16);
+            let n = stats.count();
+            let raw_splits = stats.simulated_split_count();
+            let synced_splits = stats.synced_split_count(win_ms as f64);
+            let grouped = stats.grouped_count(win_ms as f64);
+            ui.add_space(8.0);
+            ui.label(RichText::new("Your stick  vs  NOBD Controller").strong().size(14.0));
+            ui.columns(2, |cols| {
+                cols[0].group(|ui| {
+                    ui.label(RichText::new("Your stick (raw)").color(YELLOW).strong());
+                    ui.label(format!("{raw_splits} of {n} chords split @60fps"));
+                    ui.colored_label(
+                        if raw_splits > 0 { RED } else { GREEN },
+                        format!("{:.0}% would drop", stats.simulated_split_rate() * 100.0),
+                    );
+                });
+                cols[1].group(|ui| {
+                    ui.label(RichText::new(format!("NOBD Controller ({win_ms}ms)")).color(TEAL).strong());
+                    ui.label(format!("{grouped} grouped onto one frame"));
+                    ui.colored_label(
+                        if synced_splits > 0 { YELLOW } else { GREEN },
+                        format!("{synced_splits} of {n} still split"),
+                    );
+                });
+            });
+            ui.add_space(4.0);
+
             ui.add_space(6.0);
             ui.label(RichText::new("— Grouping evidence —").size(12.0).color(Color32::DARK_GRAY));
             let sf = stats.same_frame_pct();
