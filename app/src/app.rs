@@ -373,20 +373,28 @@ impl eframe::App for FingerGapApp {
                 let mut kind = self.source_kind;
                 let mut selected = self.selected_hid.clone();
                 let mut label = self.selected_hid_label.clone();
-                let devices = self.hid_devices.clone();
+                // Only your real sticks — hide the NOBD virtual pad (our pid.codes
+                // VID) so you're never testing the synced output as if it were a
+                // stock controller.
+                let devices: Vec<_> = self
+                    .hid_devices
+                    .clone()
+                    .into_iter()
+                    .filter(|d| d.id.vid != 0x1209)
+                    .collect();
                 let mut do_refresh = false;
                 let mut pending_source: Option<InputSourceKind> = None;
 
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("Input source").size(12.0).color(Color32::GRAY));
+                    ui.label(RichText::new("Test controller").size(12.0).color(Color32::GRAY));
                     egui::ComboBox::from_id_salt("input_source")
                         .selected_text(match kind {
-                            SourceKind::XInput => "XInput",
-                            SourceKind::Hid => "Raw HID",
+                            SourceKind::XInput => "Xbox / XInput sticks",
+                            SourceKind::Hid => "DirectInput fightstick",
                         })
                         .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut kind, SourceKind::XInput, "XInput");
-                            ui.selectable_value(&mut kind, SourceKind::Hid, "Raw HID");
+                            ui.selectable_value(&mut kind, SourceKind::XInput, "Xbox / XInput sticks (auto)");
+                            ui.selectable_value(&mut kind, SourceKind::Hid, "DirectInput fightstick");
                         });
 
                     if kind == SourceKind::Hid {
@@ -435,7 +443,7 @@ impl eframe::App for FingerGapApp {
                 if do_refresh {
                     self.hid_devices = list_hid_gamepads();
                     if self.source_kind == SourceKind::Hid && self.selected_hid.is_none() {
-                        if let Some(d) = self.hid_devices.first() {
+                        if let Some(d) = self.hid_devices.iter().find(|d| d.id.vid != 0x1209) {
                             self.selected_hid = Some(d.id());
                             self.selected_hid_label = d.product.clone();
                             pending_source = Some(InputSourceKind::Hid(d.id()));
