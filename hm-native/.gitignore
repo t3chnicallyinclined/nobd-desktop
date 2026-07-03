@@ -1,0 +1,2 @@
+# Private driver-signing key — never commit. Regenerate/hold locally.
+driver/nobd-driver.pfx

@@ -1,9 +1,18 @@
 use eframe::egui;
 use egui::{Color32, RichText, ScrollArea, Ui};
 
-use crate::input::{format_button, GamepadInput, InputEvent};
+use crate::hid::{list_hid_gamepads, HidDeviceId, HidDeviceInfo};
+use crate::input::{format_button, GamepadInput, InputEvent, InputSourceKind};
 use crate::monitor::ButtonMonitor;
 use crate::stats::GapStats;
+use crate::sync_service::PadType;
+
+/// Which input backend the Finger Gap Tester reads from.
+#[derive(PartialEq, Clone, Copy)]
+enum SourceKind {
+    XInput,
+    Hid,
+}
 
 const TEAL: Color32 = Color32::from_rgb(0, 180, 216);
 const GREEN: Color32 = Color32::from_rgb(80, 200, 80);
@@ -29,99 +38,10 @@ fn rec_color(ms: u32) -> Color32 {
     }
 }
 
-/// One player's live in-game stats, drawn into a column.
-fn draw_player_live(
-    ui: &mut Ui,
-    ps: &nobd_shared::PlayerStats,
-    p: usize,
-    enabled: bool,
-    s: &nobd_shared::SharedState,
-) {
-    use std::sync::atomic::Ordering;
-    let groups = ps.groups.load(Ordering::Relaxed);
-    let singles = ps.singles.load(Ordering::Relaxed);
-    let saves = ps.saves.load(Ordering::Relaxed);
-    let misses = ps.misses.load(Ordering::Relaxed);
-    let (gap_avg, gap_max) = ps.finger_gap_ms();
-    let rec = ps.recommended_window_ms();
-    let frame_us = ps.frame_us.load(Ordering::Relaxed);
-    let (gp_avg, gp_max) = ps.game_perceived_ms();
-    let waits = ps.frame_waits.load(Ordering::Relaxed);
-    let dels = ps.gp_lat_count.load(Ordering::Relaxed);
-
-    let head = if ps.active() { TEAL } else { Color32::GRAY };
-    ui.label(RichText::new(format!("Player {}", p + 1)).strong().size(15.0).color(head));
-
-    if enabled {
-        ui.horizontal(|ui| {
-            ui.label(RichText::new(format!("{saves}")).size(26.0).strong().color(GREEN));
-            ui.label("splits caught");
-        });
-    } else {
-        ui.horizontal(|ui| {
-            ui.label(RichText::new(format!("{misses}")).size(26.0).strong().color(RED));
-            ui.label(RichText::new("splits MISSED").color(RED));
-        });
-    }
-
-    egui::Grid::new(format!("pstats_{p}")).num_columns(2).spacing([10.0, 3.0]).show(ui, |ui| {
-        ui.label("Grouped / singles:");
-        ui.label(format!("{groups} / {singles}"));
-        ui.end_row();
-        ui.label("Input latency:");
-        if gp_max > 0.0 {
-            ui.colored_label(
-                if gp_avg < 8.0 { GREEN } else if gp_avg < 16.0 { YELLOW } else { ORANGE },
-                format!("{gp_avg:.1} / {gp_max:.1} ms"),
-            );
-        } else { ui.weak("—"); }
-        ui.end_row();
-        ui.label("Waited a frame:");
-        if dels > 0 {
-            let pct = waits as f64 / dels as f64 * 100.0;
-            ui.colored_label(
-                if pct < 35.0 { GREEN } else if pct < 60.0 { YELLOW } else { ORANGE },
-                format!("{waits}/{dels} ({pct:.0}%)"),
-            );
-        } else { ui.weak("—"); }
-        ui.end_row();
-        ui.label("Finger gap:");
-        if gap_max > 0.0 {
-            ui.colored_label(rec_color(gap_avg.round() as u32), format!("{gap_avg:.1} / {gap_max:.1} ms"));
-        } else { ui.weak("—"); }
-        ui.end_row();
-        ui.label("Frame time:");
-        if frame_us > 0 {
-            ui.label(format!("{:.2} ms", frame_us as f64 / 1000.0));
-        } else { ui.weak("—"); }
-        ui.end_row();
-    });
-
-    // This player's own sync window.
-    let mut win = s.window_ms[p].load(Ordering::Relaxed);
-    if ui.add(egui::Slider::new(&mut win, 1..=16).suffix(" ms").text("window")).changed() {
-        s.window_ms[p].store(win, Ordering::Relaxed);
-    }
-    if rec > 0 {
-        ui.horizontal(|ui| {
-            ui.label("Rec:");
-            ui.colored_label(rec_color(rec), RichText::new(format!("{rec} ms")).strong());
-            if ui.small_button("Apply").clicked() {
-                s.window_ms[p].store(rec, Ordering::Relaxed);
-            }
-        });
-    }
-}
-
-// Last DLL heartbeat we saw, to detect whether the in-game hook is actively polling.
-static LAST_HB: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
 #[derive(PartialEq, Clone, Copy)]
 enum Tab {
     NobdSync,
     GapTester,
-    ButtonMonitor,
-    Install,
 }
 
 enum GapLogEntry {
@@ -163,24 +83,52 @@ pub struct FingerGapApp {
     active_tab: Tab,
     error_msg: Option<String>,
     tray: Option<crate::tray::Tray>,
-    game_path: String,
-    install_msg: String,
     last_cfg: crate::persist::Cfg,
     /// Sliding-window size (recent chords) the grouping verdict is judged over.
     decision_window: usize,
+    /// Input source for the Finger Gap Tester (XInput vs raw HID).
+    source_kind: SourceKind,
+    /// Cached HID gamepad list for the device picker.
+    hid_devices: Vec<HidDeviceInfo>,
+    /// Selected HID device (when source_kind == Hid).
+    selected_hid: Option<HidDeviceId>,
+    /// Cached display label for the active HID device (for the source note).
+    selected_hid_label: String,
+    /// System-wide sync (read real pad → group → virtual pad). Runs by default;
+    /// dropping it unplugs the virtual pad.
+    sync_service: crate::sync_service::SyncService,
+    /// NOBD Controller mode (branded HID vs XInput).
+    pad_type: PadType,
 }
 
 impl FingerGapApp {
     pub fn new(ctx: &egui::Context) -> Self {
         // Restore saved settings into shared memory before anything reads it.
         let last_cfg = crate::persist::load();
-        let (input, error_msg) = match GamepadInput::new() {
+        let ui_cfg = crate::persist::load_ui();
+        let hid_devices = list_hid_gamepads();
+        let pad_type = PadType::from_u32(ui_cfg.pad_type);
+
+        // Resolve the desired input source, falling back to XInput if a saved HID
+        // device is no longer present.
+        let (source_kind, selected_hid, selected_hid_label, source) = if ui_cfg.input_source == 1 {
+            match hid_devices.iter().find(|d| d.id.path == ui_cfg.hid_device) {
+                Some(d) => (
+                    SourceKind::Hid,
+                    Some(d.id()),
+                    d.product.clone(),
+                    InputSourceKind::Hid(d.id()),
+                ),
+                None => (SourceKind::XInput, None, String::new(), InputSourceKind::XInput),
+            }
+        } else {
+            (SourceKind::XInput, None, String::new(), InputSourceKind::XInput)
+        };
+
+        let (input, error_msg) = match GamepadInput::new(source) {
             Ok(gi) => (Some(gi), None),
             Err(e) => (None, Some(format!("Gamepad init failed: {e}"))),
         };
-        let game_path = crate::install::find_game_dir()
-            .map(|p| p.display().to_string())
-            .unwrap_or_default();
         Self {
             input,
             stats: Vec::new(),
@@ -192,11 +140,60 @@ impl FingerGapApp {
             active_tab: Tab::NobdSync,
             error_msg,
             tray: crate::tray::spawn(ctx.clone()),
-            game_path,
-            install_msg: String::new(),
             last_cfg,
             decision_window: crate::stats::DEFAULT_WINDOW,
+            source_kind,
+            hid_devices,
+            selected_hid,
+            selected_hid_label,
+            sync_service: crate::sync_service::SyncService::start(pad_type),
+            pad_type,
         }
+    }
+
+    /// Clear local gap-tester state (stats/counts/log/monitor) — reused by the
+    /// Reset button and by an input-source switch.
+    fn reset_local_stats(&mut self) {
+        self.stats.clear();
+        self.stray_counts.clear();
+        self.bounce_counts.clear();
+        self.total_pairs.clear();
+        self.gap_log.clear();
+        self.monitor.clear();
+    }
+
+    /// Drop the current input backend and start a new one on `source`. Dropping
+    /// the old `GamepadInput` ends its background thread (its channel sender
+    /// errors on the next send). Local stats are cleared since per-source button
+    /// identity / slots differ.
+    fn rebuild_input(&mut self, source: InputSourceKind) {
+        match GamepadInput::new(source) {
+            Ok(gi) => {
+                self.input = Some(gi);
+                self.error_msg = None;
+            }
+            Err(e) => {
+                self.input = None;
+                self.error_msg = Some(format!("Gamepad init failed: {e}"));
+            }
+        }
+        self.reset_local_stats();
+    }
+
+    /// Persist the current input-source choice (separate from shared-mem Cfg).
+    fn persist_ui(&self) {
+        crate::persist::save_ui(&crate::persist::UiCfg {
+            input_source: match self.source_kind {
+                SourceKind::XInput => 0,
+                SourceKind::Hid => 1,
+            },
+            hid_device: self
+                .selected_hid
+                .as_ref()
+                .map(|id| id.to_persist())
+                .unwrap_or_default(),
+            pad_type: self.pad_type.as_u32(),
+        });
     }
 }
 
@@ -218,93 +215,6 @@ impl FingerGapApp {
         }
     }
 
-    fn draw_install(&mut self, ctx: &egui::Context) {
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.add_space(6.0);
-            ui.heading("Install NOBD into MvC2");
-            ui.add_space(8.0);
-
-            let dll_ok = crate::install::dll_source().is_some();
-            if !dll_ok {
-                ui.colored_label(
-                    RED,
-                    "\u{26A0} DINPUT8.dll isn't next to nobd.exe. Keep both files in the same folder.",
-                );
-                ui.add_space(6.0);
-            }
-
-            ui.label("MvC2 game folder:");
-            ui.horizontal(|ui| {
-                ui.add(egui::TextEdit::singleline(&mut self.game_path).desired_width(460.0));
-                if ui.button("Re-detect").clicked() {
-                    match crate::install::find_game_dir() {
-                        Some(p) => {
-                            self.game_path = p.display().to_string();
-                            self.install_msg = "Found the game folder.".into();
-                        }
-                        None => {
-                            self.install_msg =
-                                "Couldn't auto-detect \u{2014} paste the game folder path above.".into()
-                        }
-                    }
-                }
-            });
-
-            let game_dir = std::path::PathBuf::from(self.game_path.trim());
-            let path_set = !self.game_path.trim().is_empty();
-            let has_game = path_set && crate::install::has_game(&game_dir);
-            let installed = path_set && crate::install::is_installed(&game_dir);
-
-            ui.add_space(4.0);
-            if !path_set {
-                ui.colored_label(YELLOW, "No game folder set.");
-            } else if !has_game {
-                ui.colored_label(YELLOW, "That folder doesn't contain the MvC2 executable.");
-            } else if installed {
-                ui.colored_label(GREEN, "\u{2713} NOBD is installed here.");
-            } else {
-                ui.colored_label(TEAL, "Game found \u{2014} ready to install.");
-            }
-
-            ui.add_space(10.0);
-            ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(dll_ok && has_game, egui::Button::new("  Install to game  "))
-                    .clicked()
-                {
-                    self.install_msg = match crate::install::install(&game_dir) {
-                        Ok(()) => "Installed \u{2713}  \u{2014} launch MvC2 (close it first if it's open).".into(),
-                        Err(e) => format!("Install failed: {e}"),
-                    };
-                }
-                if ui.add_enabled(installed, egui::Button::new("  Uninstall  ")).clicked() {
-                    self.install_msg = match crate::install::uninstall(&game_dir) {
-                        Ok(()) => "Uninstalled.".into(),
-                        Err(e) => format!("Uninstall failed: {e}"),
-                    };
-                }
-                if ui.button("  Create desktop shortcut  ").clicked() {
-                    self.install_msg = match crate::install::create_desktop_shortcut() {
-                        Ok(()) => "Desktop shortcut created.".into(),
-                        Err(e) => format!("Shortcut failed: {e}"),
-                    };
-                }
-            });
-
-            if !self.install_msg.is_empty() {
-                ui.add_space(8.0);
-                ui.label(RichText::new(&self.install_msg).strong());
-            }
-
-            ui.add_space(14.0);
-            ui.separator();
-            ui.label(RichText::new("Notes").strong());
-            ui.label("\u{2022} Close the game before Install / Uninstall \u{2014} the DLL is locked while it runs.");
-            ui.label("\u{2022} Enable Steam Input for MvC2 (Steam \u{2192} game \u{2192} Controller).");
-            ui.label("\u{2022} Windows SmartScreen may warn on first run (unsigned) \u{2014} that's expected.");
-            ui.label("\u{2022} To fully remove: Uninstall here, then delete nobd.exe + DINPUT8.dll.");
-        });
-    }
 }
 
 impl eframe::App for FingerGapApp {
@@ -406,68 +316,29 @@ impl eframe::App for FingerGapApp {
 
         ctx.request_repaint_after(std::time::Duration::from_millis(1));
 
-        // DLL install + in-game hook status, computed once per frame and shown as
-        // a banner on every tab. (hook_live uses LAST_HB, so compute it only here.)
-        let game_dir = std::path::PathBuf::from(self.game_path.trim());
-        let dll_installed =
-            !self.game_path.trim().is_empty() && crate::install::is_installed(&game_dir);
-        let hb = nobd_shared::state()
-            .dll_heartbeat
-            .load(std::sync::atomic::Ordering::Relaxed);
-        let hook_live = {
-            let prev = LAST_HB.swap(hb, std::sync::atomic::Ordering::Relaxed);
-            hb != prev && hb != 0
-        };
-
         // === TOP BAR ===
         egui::TopBottomPanel::top("header").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                ui.heading(RichText::new("NOBD INPUT TESTER").strong());
+                ui.heading(RichText::new("NOBD").strong());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("Reset").clicked() {
-                        // Local gap-tester stats (all controllers)…
-                        self.stats.clear();
-                        self.stray_counts.clear();
-                        self.bounce_counts.clear();
-                        self.total_pairs.clear();
-                        self.gap_log.clear();
-                        self.monitor.clear();
-                        // …and the live in-game (shared-memory) NOBD stats.
-                        nobd_shared::state().reset_stats();
+                        self.reset_local_stats();
                     }
                 });
             });
 
-            // Controller status
-            if let Some(ref err) = self.error_msg {
-                ui.colored_label(Color32::RED, format!("Error: {err}"));
-            } else if let Some(ref input) = self.input {
-                if let Some(name) = input.connected_gamepad_name() {
-                    ui.horizontal(|ui| {
-                        ui.colored_label(GREEN, "\u{25CF}");
-                        ui.label(format!("Controller: {name}"));
-                    });
-                } else {
-                    ui.horizontal(|ui| {
-                        ui.colored_label(YELLOW, "\u{25CF}");
-                        ui.label("No controller detected. Connect a gamepad.");
-                    });
-                }
-            }
-
-            // DLL / in-game hook status banner — guides install if it's missing.
-            if hook_live {
-                ui.colored_label(GREEN, "\u{25CF} In-game hook LIVE");
-            } else if dll_installed {
-                ui.colored_label(YELLOW, "\u{25CF} DLL installed \u{2014} launch MvC2 to activate the sync");
+            // System-wide sync status banner.
+            let err = self.sync_service.error();
+            if err == crate::sync_service::ERR_NO_NOBD {
+                ui.colored_label(RED, "\u{25CF} NOBD Controller not set up — click Enable");
+            } else if err == crate::sync_service::ERR_NO_XINPUT {
+                ui.colored_label(RED, "\u{25CF} XInput unavailable");
+            } else if self.sync_service.is_active() {
+                ui.colored_label(GREEN, "\u{25CF} System-wide sync ACTIVE — NOBD Controller is live");
+            } else if self.sync_service.real_slot().is_none() {
+                ui.colored_label(YELLOW, "\u{25CF} Waiting for a controller…");
             } else {
-                ui.horizontal(|ui| {
-                    ui.colored_label(RED, "\u{25CF} DLL not installed.");
-                    if ui.button("Open Install tab").clicked() {
-                        self.active_tab = Tab::Install;
-                    }
-                    ui.label("so the sync loads with MvC2.");
-                });
+                ui.colored_label(YELLOW, "\u{25CF} Starting sync…");
             }
 
             ui.separator();
@@ -484,22 +355,100 @@ impl eframe::App for FingerGapApp {
                     Tab::GapTester,
                     RichText::new("  Finger Gap Tester  ").size(15.0),
                 );
-                ui.selectable_value(
-                    &mut self.active_tab,
-                    Tab::ButtonMonitor,
-                    RichText::new("  Button Monitor  ").size(15.0),
-                );
-                ui.selectable_value(
-                    &mut self.active_tab,
-                    Tab::Install,
-                    RichText::new("  Install  ").size(15.0),
-                );
             });
 
             // Decision window — the grouping verdict is judged over only the last
             // N chords, so it re-decides live and flips when you toggle NOBD
             // mid-session (no Reset needed). Only relevant on the Gap Tester tab.
             if self.active_tab == Tab::GapTester {
+                // Input source selector (XInput vs raw HID + device picker). Work
+                // on LOCAL copies inside the egui closures, then write back +
+                // apply after — avoids nested mutable borrows of `self`.
+                let mut kind = self.source_kind;
+                let mut selected = self.selected_hid.clone();
+                let mut label = self.selected_hid_label.clone();
+                // Only your real sticks — hide the NOBD virtual pad (our pid.codes
+                // VID) so you're never testing the synced output as if it were a
+                // stock controller.
+                let devices: Vec<_> = self
+                    .hid_devices
+                    .clone()
+                    .into_iter()
+                    .filter(|d| d.id.vid != 0x1209)
+                    .collect();
+                let mut do_refresh = false;
+                let mut pending_source: Option<InputSourceKind> = None;
+
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Test controller").size(12.0).color(Color32::GRAY));
+                    egui::ComboBox::from_id_salt("input_source")
+                        .selected_text(match kind {
+                            SourceKind::XInput => "Xbox / XInput sticks",
+                            SourceKind::Hid => "DirectInput fightstick",
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut kind, SourceKind::XInput, "Xbox / XInput sticks (auto)");
+                            ui.selectable_value(&mut kind, SourceKind::Hid, "DirectInput fightstick");
+                        });
+
+                    if kind == SourceKind::Hid {
+                        let sel_text = if label.is_empty() {
+                            "Select device…".to_owned()
+                        } else {
+                            label.clone()
+                        };
+                        egui::ComboBox::from_id_salt("hid_device")
+                            .selected_text(sel_text)
+                            .show_ui(ui, |ui| {
+                                if devices.is_empty() {
+                                    ui.label(
+                                        RichText::new("No HID gamepads — Xbox pads aren't usable here; use a DInput stick")
+                                            .size(11.0)
+                                            .color(Color32::GRAY),
+                                    );
+                                }
+                                for d in &devices {
+                                    let chosen = selected.as_ref() == Some(&d.id);
+                                    let l = format!("{} ({:04x}:{:04x})", d.product, d.id.vid, d.id.pid);
+                                    if ui.selectable_label(chosen, l).clicked() {
+                                        selected = Some(d.id());
+                                        label = d.product.clone();
+                                        pending_source = Some(InputSourceKind::Hid(d.id()));
+                                    }
+                                }
+                            });
+                        if ui.button("Refresh").clicked() {
+                            do_refresh = true;
+                        }
+                    }
+                });
+
+                // Detect a source-kind change.
+                if kind != self.source_kind {
+                    self.source_kind = kind;
+                    match kind {
+                        SourceKind::XInput => pending_source = Some(InputSourceKind::XInput),
+                        SourceKind::Hid => do_refresh = true, // refresh + auto-pick below
+                    }
+                }
+                self.selected_hid = selected;
+                self.selected_hid_label = label;
+
+                if do_refresh {
+                    self.hid_devices = list_hid_gamepads();
+                    if self.source_kind == SourceKind::Hid && self.selected_hid.is_none() {
+                        if let Some(d) = self.hid_devices.iter().find(|d| d.id.vid != 0x1209) {
+                            self.selected_hid = Some(d.id());
+                            self.selected_hid_label = d.product.clone();
+                            pending_source = Some(InputSourceKind::Hid(d.id()));
+                        }
+                    }
+                }
+                if let Some(src) = pending_source {
+                    self.rebuild_input(src);
+                    self.persist_ui();
+                }
+
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("Decision window").size(12.0).color(Color32::GRAY));
                     ui.add(
@@ -512,13 +461,61 @@ impl eframe::App for FingerGapApp {
                     .on_hover_text("How many recent chords the ON/OFF verdict is based on. Lower = flips faster when you toggle NOBD; higher = steadier.");
                 });
             }
+
+            // System-wide sync tab: the NOBD Controller is the automatic synced
+            // output — the user just deals with sync + their stock stick. The
+            // device *type* is an Advanced detail, defaulting to the branded
+            // "NOBD Controller" (HID).
+            if self.active_tab == Tab::NobdSync {
+                // One-time setup (visible until the NOBD Controller is ready).
+                if !crate::nobd_setup::is_ready(self.pad_type) {
+                    ui.horizontal(|ui| {
+                        ui.colored_label(YELLOW, "\u{25CF}");
+                        if crate::nobd_setup::is_elevated() {
+                            if ui.button("Enable NOBD Controller").clicked() {
+                                if crate::nobd_setup::run_setup(self.pad_type).is_ok() {
+                                    self.sync_service =
+                                        crate::sync_service::SyncService::start(self.pad_type);
+                                }
+                            }
+                            ui.label(
+                                RichText::new("One-time: installs the NOBD Controller.")
+                                    .size(11.0)
+                                    .color(Color32::GRAY),
+                            );
+                        } else if ui.button("Enable NOBD Controller (admin)").clicked() {
+                            if crate::nobd_setup::relaunch_elevated_for_setup(self.pad_type).is_ok() {
+                                std::process::exit(0);
+                            }
+                        }
+                    });
+                }
+
+                // Game-compatibility mode — tucked away; most users never open it.
+                let mut pt = self.pad_type;
+                ui.collapsing(
+                    RichText::new("Advanced \u{2014} game compatibility").size(12.0).color(Color32::GRAY),
+                    |ui| {
+                        ui.radio_value(&mut pt, PadType::Hid, "NOBD Controller (Steam / DirectInput games)");
+                        ui.radio_value(&mut pt, PadType::Xinput, "Xbox pad (for XInput-only games, e.g. MvC2)");
+                        ui.label(
+                            RichText::new("Switching re-creates the device — click Enable once for the new mode.")
+                                .size(11.0)
+                                .color(Color32::GRAY),
+                        );
+                    },
+                );
+                if pt != self.pad_type {
+                    self.pad_type = pt;
+                    self.sync_service = crate::sync_service::SyncService::start(pt);
+                    self.persist_ui();
+                }
+            }
         });
 
         match self.active_tab {
-            Tab::NobdSync => draw_nobd_sync(ctx, hook_live, dll_installed),
+            Tab::NobdSync => draw_nobd_sync(ctx, &self.sync_service, self.pad_type),
             Tab::GapTester => self.draw_gap_tester(ctx),
-            Tab::ButtonMonitor => self.draw_button_monitor(ctx),
-            Tab::Install => self.draw_install(ctx),
         }
 
         // Persist settings whenever they change (from the panel or the tray).
@@ -528,188 +525,100 @@ impl eframe::App for FingerGapApp {
             self.last_cfg = cfg;
         }
 
-        // Repaint continuously so live DLL stats / gamepad input stay current.
+        // Repaint continuously so live status / gamepad input stay current.
         ctx.request_repaint_after(std::time::Duration::from_millis(50));
     }
 }
 
-// ─── NOBD SYNC TAB (controls the live DINPUT8.dll over shared memory) ───
+// ─── SYSTEM-WIDE SYNC TAB (drives the in-GUI SyncService → virtual NOBD pad) ───
 
-fn draw_nobd_sync(ctx: &egui::Context, hook_live: bool, dll_installed: bool) {
+fn draw_nobd_sync(ctx: &egui::Context, sync: &crate::sync_service::SyncService, pad: PadType) {
     use std::sync::atomic::Ordering;
     let s = nobd_shared::state();
+    let steam_name = match pad {
+        PadType::Hid => "NOBD Controller",
+        PadType::Xinput => "NOBD Controller (Xbox 360 / XInput)",
+    };
 
     egui::CentralPanel::default().show(ctx, |ui| {
-        // Connection status (computed once per frame in update()).
+        ui.heading("System-wide sync");
+
+        // Service status.
+        let err = sync.error();
         ui.horizontal(|ui| {
-            if hook_live {
-                ui.colored_label(GREEN, "\u{25CF}");
-                ui.label(RichText::new("In-game hook LIVE").color(GREEN));
-            } else if dll_installed {
-                ui.colored_label(YELLOW, "\u{25CF}");
-                ui.label("DLL installed \u{2014} launch MvC2 to activate");
-            } else {
+            if err == crate::sync_service::ERR_NO_XINPUT {
                 ui.colored_label(RED, "\u{25CF}");
-                ui.label("DLL not installed \u{2014} open the Install tab to set it up");
+                ui.label(RichText::new("XInput unavailable").color(RED));
+            } else if err == crate::sync_service::ERR_NO_NOBD {
+                ui.colored_label(RED, "\u{25CF}");
+                ui.label(RichText::new("NOBD Controller not set up — click Enable above").color(RED));
+            } else if sync.is_active() {
+                ui.colored_label(GREEN, "\u{25CF}");
+                ui.label(RichText::new("ACTIVE — virtual NOBD pad is live").color(GREEN));
+                if !sync.real_present() {
+                    ui.colored_label(YELLOW, "(real pad not reporting)");
+                }
+            } else if sync.real_slot().is_none() {
+                ui.colored_label(YELLOW, "\u{25CF}");
+                ui.label("Waiting for a controller…");
+            } else {
+                ui.colored_label(YELLOW, "\u{25CF}");
+                ui.label("Starting…");
             }
         });
-        // Scope note: the sync is an in-game DLL hook, not a system-wide driver.
-        ui.label(
-            RichText::new(
-                "Note: the NOBD sync runs inside the game via the injected DLL. It only conditions \
-                 inputs while MvC2 is running with the hook LIVE (above) \u{2014} it does not change \
-                 your controller system-wide or in other apps.",
-            )
-            .size(11.0)
-            .color(Color32::GRAY),
-        );
         ui.separator();
 
-        // ── Master control ──
+        // ── Controls (what you actually touch) ──
         let mut enabled = s.enabled.load(Ordering::Relaxed) != 0;
         if ui.checkbox(&mut enabled, RichText::new("NOBD sync window").size(16.0)).changed() {
             s.enabled.store(enabled as u32, Ordering::Relaxed);
         }
 
-        // ── Latch mode ──
-        // Continuous is now the only mode (best latency + online-safe). Defer and
-        // Block remain implemented in the DLL; the multi-mode selector below is
-        // commented out, not deleted, so they can be re-exposed easily.
         ui.add_space(4.0);
-        ui.label(RichText::new("Latch mode").strong());
-        s.mode.store(2, Ordering::Relaxed); // force Continuous
-        s.block_in_frame.store(0, Ordering::Relaxed);
-        ui.colored_label(
-            TEAL,
-            "\u{25C9} Continuous: a ~1kHz background thread runs the sync window on its own clock and \
-             the game samples the result \u{2014} like the stick's firmware. No thread stall \
-             (online-safe), and most presses land on the same frame anyway (no unconditional +1 frame). \
-             Watch \u{201C}Poll rate\u{201D} and \u{201C}Waited a frame\u{201D} below.",
-        );
-        /* Multi-mode selector \u{2014} disabled (Continuous-only). Uncomment to restore Defer/Block:
-        let mut mode = s.mode.load(Ordering::Relaxed);
         ui.horizontal(|ui| {
-            for (m, label) in [(0u32, "  Defer  "), (1u32, "  Block  "), (2u32, "  Continuous  ")] {
-                if ui.selectable_label(mode == m, RichText::new(label).size(15.0)).clicked() {
-                    mode = m;
-                    s.mode.store(m, Ordering::Relaxed);
-                    s.block_in_frame.store((m == 1) as u32, Ordering::Relaxed);
-                }
+            ui.label("Sync window:");
+            let mut w = s.window_ms[0].load(Ordering::Relaxed).clamp(1, 16);
+            if ui.add(egui::Slider::new(&mut w, 1..=16).suffix(" ms")).changed() {
+                s.window_ms[0].store(w, Ordering::Relaxed);
             }
         });
-        match mode {
-            1 => { ui.colored_label(RED, "\u{26A0} Block: OFFLINE ONLY. ..."); }
-            2 => { ui.colored_label(TEAL, "\u{25C9} Continuous: ..."); }
-            _ => { ui.colored_label(GREEN, "\u{2713} Defer: online-safe. ..."); }
-        }
-        */
+        ui.weak("Set this from your finger gap on the Finger Gap Tester tab. 16 ms = one 60fps frame (the honest max).");
 
-        ui.add_space(6.0);
-
-        // ── Directions: testing only, clearly warned ──
-        let mut dirs = s.directions_windowed.load(Ordering::Relaxed) != 0;
-        if ui.checkbox(&mut dirs, "Window directions too").changed() {
-            s.directions_windowed.store(dirs as u32, Ordering::Relaxed);
-        }
-        ui.colored_label(
-            ORANGE,
-            "\u{26A0} Testing only \u{2014} not recommended. Applies the window to directions as well, \
-             which delays directional inputs and hurts motion tech (fast fly / refly, triangle \
-             dashing, wavedashes). Leave OFF for play.",
-        );
-
-        ui.add_space(8.0);
-
-        // ── Window size (per player — each gets its own slider in the columns below) ──
-        ui.label(RichText::new("Sync window").strong());
-        ui.weak(
-            "Each player sets their own window below. Capped at 16 ms = one frame — the game's \
-             original \"same-frame\" window. A larger window would group presses the game itself \
-             would have split (an unfair reach), so 16 ms is the honest maximum. Bigger is more \
-             forgiving but adds latency to a lone press; set it from each player's finger gap.",
-        );
-
-        // Settle is a Block-only knob (3-button straggler wait); no effect in
-        // Continuous, so it's hidden. Uncomment if Block is re-exposed.
-        /*
-        ui.horizontal(|ui| {
-            ui.label("Settle (3-button straggler):");
-            let mut settle = s.settle_ms.load(Ordering::Relaxed);
-            if ui.add(egui::Slider::new(&mut settle, 0..=3).suffix(" ms")).changed() {
-                s.settle_ms.store(settle, Ordering::Relaxed);
-            }
-        });
-        */
-
+        // ── Everything explanatory folds in here — open it once, then forget it. ──
         ui.add_space(10.0);
-        ui.separator();
-
-        // ── Live in-game stats — both players side by side ──
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("Live in-game stats").strong().size(16.0));
-            ui.add_space(10.0);
-            ui.label("Poll rate:");
-            let poll_hz = s.poll_hz.load(Ordering::Relaxed);
-            if poll_hz > 0 {
-                ui.colored_label(if poll_hz >= 500 { GREEN } else { ORANGE }, format!("{poll_hz} Hz"));
-            } else {
-                ui.weak("—");
-            }
-        });
-        ui.add_space(4.0);
-        ui.columns(nobd_shared::NUM_PLAYERS, |cols| {
-            for p in 0..nobd_shared::NUM_PLAYERS {
-                draw_player_live(&mut cols[p], &s.players[p], p, enabled, s);
-            }
-        });
-
-        egui::CollapsingHeader::new(RichText::new("\u{24D8}  What is the frame-boundary issue?").color(TEAL))
+        egui::CollapsingHeader::new(RichText::new("\u{24D8}  How it works & setup").color(TEAL))
             .default_open(false)
             .show(ui, |ui| {
+                ui.label(RichText::new("Setup").strong());
+                ui.label("1.  Click Enable (one-time, needs admin) — the picker is above.");
+                ui.label("2.  Connect your controller. The NOBD Controller comes up automatically (banner turns green).");
+                ui.label("3.  Turn on the sync window above; set it from the Finger Gap Tester.");
+                ui.label(format!(
+                    "4.  In your game's controller settings, select \"{steam_name}\" \u{2014} your stick drives it, grouped."
+                ));
+
+                ui.add_space(8.0);
+                ui.label(RichText::new("How it works").strong());
                 ui.label(
-                    "Old arcade & console games like MvC2 were built to read your controller \
-                     exactly ONCE per frame \u{2014} 60 times a second, every 16.67ms \u{2014} locked \
-                     to the hardware's fixed refresh. On the original hardware the controller and \
-                     the game's read were tightly coupled, so pressing two buttons together always \
-                     landed them on the same frame.",
+                    "A ~1 kHz background thread reads your stick and runs the sync window on its own \
+                     clock, like the controller firmware. The grouped result is delivered as the \
+                     native NOBD Controller \u{2014} universal, not tied to one game. Near-simultaneous \
+                     attacks land on the same frame; a lone press costs a frame only if it lands in \
+                     the last few ms before a read. Directions are never delayed.",
                 );
-                ui.add_space(4.0);
+
+                ui.add_space(8.0);
+                ui.label(RichText::new("The frame-boundary issue").strong());
                 ui.label(
-                    "On modern hardware (and emulation) your controller updates far faster \
-                     (1000Hz+) than the game still reads (60Hz). When you press two buttons a few \
-                     ms apart \u{2014} your natural \u{201C}finger gap\u{201D} \u{2014} the game's single \
-                     60Hz read can land BETWEEN them and see only the first button. That's the \
-                     frame-boundary issue: a dash becomes a stray jab, an assist drops, a tech is \
-                     missed \u{2014} not because you mis-input, but because the read sampled at the \
-                     wrong instant.",
-                );
-                ui.add_space(4.0);
-                ui.label(
-                    RichText::new(
-                        "NOBD watches for it: when a read catches a lone button, it briefly holds \
-                         the frame open to see if the partner is arriving, then delivers them \
-                         together \u{2014} fixing the split with sub-frame latency. The number above \
-                         counts only the cases we can prove the poll would have split.",
-                    ).color(GREEN),
+                    "Old games like MvC2 read your controller exactly ONCE per frame \u{2014} 60 times \
+                     a second, every 16.67 ms. On modern hardware your stick updates far faster \
+                     (1000 Hz+) than the game reads (60 Hz), so two buttons a few ms apart \u{2014} your \
+                     natural finger gap \u{2014} can land on either side of a single read: a dash \
+                     becomes a stray jab. NOBD groups near-simultaneous presses so they reach the game \
+                     together, on the frame it actually reads. It changes WHEN a press reports, never \
+                     WHICH buttons.",
                 );
             });
-        ui.add_space(6.0);
-
-        ui.add_space(6.0);
-        if ui.button("Reset stats").clicked() {
-            s.reset_stats();
-        }
-
-        ui.add_space(12.0);
-        ui.separator();
-        ui.label(RichText::new("How it works").strong());
-        ui.label(
-            "A ~1kHz background thread reads your stick continuously and runs the sync window on \
-             its own clock, just like the controller's firmware. The game samples the already-grouped \
-             result whenever it reads \u{2014} no thread stall (online-safe). Near-simultaneous attacks \
-             land on the same frame; a lone press only costs a frame if it lands in the last few ms \
-             before a read (see \u{201C}Waited a frame\u{201D}). Directions are never delayed.",
-        );
     });
 }
 
@@ -827,19 +736,62 @@ fn draw_gap_tester(&self, ctx: &egui::Context) {
         });
 
     egui::CentralPanel::default().show(ctx, |ui| {
-        // Scope note: the tester reads the controller directly (XInput), so it
-        // reflects the CONTROLLER's own behavior/firmware — it does not see this
-        // app's in-game NOBD sync (that runs in the game via the DLL).
+        // Which XInput slots are the real stick vs the synced NOBD pad (Xbox 360
+        // pad type only). Copy locals so the columns closure doesn't borrow self.
+        let nobd_slot = self.sync_service.virtual_slot();
+        let real_slot = self.sync_service.real_slot();
+        let sync_active = self.sync_service.is_active();
+        let is_xinput = self.source_kind == SourceKind::XInput;
+        // The synced pad's name in a game's controller list.
+        let nobd_pad_name = match self.pad_type {
+            PadType::Hid => "NOBD Controller",
+            PadType::Xinput => "NOBD Controller (XInput)",
+        };
+
         ui.add_space(4.0);
         ui.label(
             RichText::new(
-                "Reads your controller directly \u{2014} this shows the controller's own input behavior \
-                 (e.g. firmware-level grouping). It does NOT reflect this app's in-game NOBD sync, \
-                 which conditions MvC2's inputs separately.",
+                "Reads your controller directly. With System-wide sync running you'll see TWO pads here \
+                 \u{2014} your real stick AND the virtual NOBD pad: the NOBD pad reads GROUPING DETECTED, the \
+                 real one your raw finger timing. That side-by-side is the proof the sync works.",
             )
             .size(11.0)
             .color(Color32::GRAY),
         );
+        // Which input path is live — the whole point during filter verification.
+        let (source_line, source_color) = match self.source_kind {
+            SourceKind::XInput => ("Source: XInput".to_owned(), Color32::GRAY),
+            SourceKind::Hid => {
+                let label = if self.selected_hid_label.is_empty() {
+                    "(no device)".to_owned()
+                } else {
+                    self.selected_hid_label.clone()
+                };
+                (format!("Source: Raw HID — {label}"), TEAL)
+            }
+        };
+        ui.label(RichText::new(source_line).size(11.0).color(source_color));
+
+        // Call out which column is the NOBD pad to choose in-game.
+        if is_xinput && sync_active {
+            if let Some(vs) = nobd_slot {
+                egui::Frame::new()
+                    .inner_margin(8.0)
+                    .corner_radius(6.0)
+                    .stroke(egui::Stroke::new(2.0, TEAL))
+                    .show(ui, |ui| {
+                        ui.label(
+                            RichText::new(format!(
+                                "\u{25C9} System-wide sync is ON \u{2014} column C{} is the \"{}\" that NOBD created \
+                                 (your synced pad). Select THAT controller in your game; the other column is your real stick.",
+                                vs + 1, nobd_pad_name
+                            ))
+                            .size(12.0)
+                            .color(TEAL),
+                        );
+                    });
+            }
+        }
         ui.separator();
         if controllers.is_empty() {
             ui.add_space(20.0);
@@ -862,11 +814,19 @@ fn draw_gap_tester(&self, ctx: &egui::Context) {
         let ui = &mut cols[ci];
         let empty = GapStats::new();
         let stats: &GapStats = self.stats.get(*cidx).unwrap_or(&empty);
-        ui.label(
-            RichText::new(format!("C{}: {cname}", cidx + 1))
-                .strong().size(14.0)
-                .color(if stats.count() > 0 { TEAL } else { Color32::GRAY }),
-        );
+        let slot = *cidx as u32;
+        if is_xinput && nobd_slot == Some(slot) {
+            ui.label(RichText::new(format!("\u{25C9} C{}: {nobd_pad_name} (NOBD)", cidx + 1)).strong().size(14.0).color(TEAL));
+            ui.label(RichText::new("\u{2190} your synced pad \u{2014} select this in your game").size(11.0).color(TEAL));
+        } else if is_xinput && real_slot == Some(slot) {
+            ui.label(RichText::new(format!("C{}: {cname}  (your real stick)", cidx + 1)).strong().size(14.0).color(Color32::GRAY));
+        } else {
+            ui.label(
+                RichText::new(format!("C{}: {cname}", cidx + 1))
+                    .strong().size(14.0)
+                    .color(if stats.count() > 0 { TEAL } else { Color32::GRAY }),
+            );
+        }
         ui.separator();
 
         if stats.count() > 0 {
@@ -941,15 +901,75 @@ fn draw_gap_tester(&self, ctx: &egui::Context) {
                 &format!("{} / {}", stats.simulated_split_count(), stats.count()));
             draw_stat(ui, "Samples (window)", &format!("{} / {}", stats.count(), stats.window()));
 
+            // ── Your stick (raw) vs the synced NOBD Controller ──────────────
+            // Same chords you just pressed, run through the NOBD sync window:
+            // any chord within the window lands on one frame; only wider gaps
+            // can still split. This IS what the NOBD Controller delivers.
+            let win_ms = nobd_shared::state()
+                .window_ms[0]
+                .load(std::sync::atomic::Ordering::Relaxed)
+                .clamp(1, 16);
+            let n = stats.count();
+            let raw_splits = stats.simulated_split_count();
+            let synced_splits = stats.synced_split_count(win_ms as f64);
+            let grouped = stats.grouped_count(win_ms as f64);
+            ui.add_space(8.0);
+            ui.label(RichText::new("Your stick  vs  NOBD Controller").strong().size(14.0));
+            ui.columns(2, |cols| {
+                cols[0].group(|ui| {
+                    ui.label(RichText::new("Your stick (raw)").color(YELLOW).strong());
+                    ui.label(format!("{raw_splits} of {n} chords split @60fps"));
+                    ui.colored_label(
+                        if raw_splits > 0 { RED } else { GREEN },
+                        format!("{:.0}% would drop", stats.simulated_split_rate() * 100.0),
+                    );
+                });
+                cols[1].group(|ui| {
+                    ui.label(RichText::new(format!("NOBD Controller ({win_ms}ms)")).color(TEAL).strong());
+                    ui.label(format!("{grouped} grouped onto one frame"));
+                    ui.colored_label(
+                        if synced_splits > 0 { YELLOW } else { GREEN },
+                        format!("{synced_splits} of {n} still split"),
+                    );
+                });
+            });
+            ui.add_space(4.0);
+
             ui.add_space(6.0);
-            ui.label(RichText::new("— Grouping evidence —").size(12.0).color(Color32::DARK_GRAY));
-            let sf = stats.same_frame_pct();
-            draw_stat_colored(ui, "Same-frame rate", &format!("{sf:.0}%"),
-                if sf >= 30.0 { TEAL } else { GREEN });
-            draw_stat(ui, "Dead zone", &format!("{} frame(s)", stats.dead_zone_frames()));
-            draw_stat(ui, "Solo presses", &format!("{}", stats.solo_count()));
-            draw_stat(ui, "Distinct chords", &format!("{}", stats.distinct_chords()));
-            draw_stat(ui, "USB frame size", &format!("{:.2}ms", stats.frame_ms()));
+            egui::CollapsingHeader::new(RichText::new("Grouping evidence").size(12.0).color(Color32::GRAY))
+                .id_salt(format!("gap_details_{cidx}"))
+                .show(ui, |ui| {
+                    let sf = stats.same_frame_pct();
+                    draw_stat_colored(ui, "Same-frame rate", &format!("{sf:.0}%"),
+                        if sf >= 30.0 { TEAL } else { GREEN });
+                    draw_stat(ui, "Dead zone", &format!("{} frame(s)", stats.dead_zone_frames()));
+                    draw_stat(ui, "Solo presses", &format!("{}", stats.solo_count()));
+                    draw_stat(ui, "Distinct chords", &format!("{}", stats.distinct_chords()));
+                    draw_stat(ui, "USB frame size", &format!("{:.2}ms", stats.frame_ms()));
+                });
+
+            // Per-button details (rolled in from the old Button Monitor tab).
+            let infos = self.monitor.button_infos(*cidx);
+            if !infos.is_empty() {
+                egui::CollapsingHeader::new(RichText::new("Per-button (hold / repress)").size(12.0).color(Color32::GRAY))
+                    .id_salt(format!("btn_details_{cidx}"))
+                    .show(ui, |ui| {
+                        egui::Grid::new(format!("bstats_{cidx}")).striped(true).min_col_width(44.0).show(ui, |ui| {
+                            ui.label(RichText::new("Btn").strong().color(TEAL));
+                            ui.label(RichText::new("#").strong().color(TEAL));
+                            ui.label(RichText::new("Hold").strong().color(TEAL));
+                            ui.label(RichText::new("Repress").strong().color(TEAL));
+                            ui.end_row();
+                            for info in &infos {
+                                ui.label(&info.name);
+                                ui.label(format!("{}", info.press_count));
+                                ui.label(if info.avg_hold_ms > 0.0 { format!("{:.0}ms", info.avg_hold_ms) } else { "-".into() });
+                                ui.label(if info.avg_repress_ms > 0.0 { format!("{:.0}ms", info.avg_repress_ms) } else { "-".into() });
+                                ui.end_row();
+                            }
+                        });
+                    });
+            }
         }
 
         // Report-rate footnote (low ≈ Steam Input resampling; use native XInput).
@@ -962,110 +982,6 @@ fn draw_gap_tester(&self, ctx: &egui::Context) {
             );
         }
 
-        }
-        });
-        });
-    });
-}
-}
-
-// ─── BUTTON MONITOR TAB ───
-
-impl FingerGapApp {
-fn draw_button_monitor(&self, ctx: &egui::Context) {
-    let controllers = self
-        .input
-        .as_ref()
-        .map(|i| i.controllers())
-        .unwrap_or_default();
-
-    egui::TopBottomPanel::bottom("monitor_log")
-        .min_height(140.0)
-        .resizable(true)
-        .show(ctx, |ui| {
-            ui.heading("Event Log (all controllers)");
-            ui.separator();
-            ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
-                for entry in self.monitor.event_log().iter().rev() {
-                    ui.horizontal(|ui| {
-                        let color = if entry.event_type == "PRESS" { GREEN } else { Color32::GRAY };
-                        ui.monospace(
-                            RichText::new(format!(
-                                "[C{}] {:<14} {:<8} {}",
-                                entry.controller + 1, entry.button_name, entry.event_type, entry.detail,
-                            ))
-                            .color(color),
-                        );
-                    });
-                }
-            });
-        });
-
-    egui::CentralPanel::default().show(ctx, |ui| {
-        if controllers.is_empty() {
-            ui.add_space(40.0);
-            ui.vertical_centered(|ui| {
-                ui.label(
-                    RichText::new("Connect a controller and press any button")
-                        .size(16.0).color(Color32::GRAY),
-                );
-                ui.label(
-                    RichText::new("Hold duration, repress timing & activation stats — per controller")
-                        .size(13.0).color(Color32::DARK_GRAY),
-                );
-            });
-            return;
-        }
-        ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
-        ui.columns(controllers.len(), |cols| {
-        for (ci, (cidx, cname)) in controllers.iter().enumerate() {
-            let ui = &mut cols[ci];
-            let infos = self.monitor.button_infos(*cidx);
-            ui.label(
-                RichText::new(format!("C{}: {cname}", cidx + 1))
-                    .strong().size(14.0)
-                    .color(if infos.is_empty() { Color32::GRAY } else { TEAL }),
-            );
-            ui.separator();
-            if infos.is_empty() {
-                ui.weak("Press any button…");
-                continue;
-            }
-
-            // Active buttons
-            ui.horizontal_wrapped(|ui| {
-                for info in &infos {
-                    let (color, tc) = if info.held {
-                        (TEAL, Color32::BLACK)
-                    } else {
-                        (Color32::from_rgb(40, 40, 50), Color32::GRAY)
-                    };
-                    egui::Frame::new()
-                        .inner_margin(egui::vec2(8.0, 4.0))
-                        .corner_radius(4.0)
-                        .fill(color)
-                        .show(ui, |ui| {
-                            ui.label(RichText::new(&info.name).strong().color(tc));
-                        });
-                }
-            });
-            ui.add_space(6.0);
-
-            // Per-button stats (compact for the column).
-            egui::Grid::new(format!("bstats_{cidx}")).striped(true).min_col_width(48.0).show(ui, |ui| {
-                ui.label(RichText::new("Btn").strong().color(TEAL));
-                ui.label(RichText::new("#").strong().color(TEAL));
-                ui.label(RichText::new("Avg hold").strong().color(TEAL));
-                ui.label(RichText::new("Avg repress").strong().color(TEAL));
-                ui.end_row();
-                for info in &infos {
-                    ui.label(&info.name);
-                    ui.label(format!("{}", info.press_count));
-                    ui.label(if info.avg_hold_ms > 0.0 { format!("{:.0}ms", info.avg_hold_ms) } else { "-".to_string() });
-                    ui.label(if info.avg_repress_ms > 0.0 { format!("{:.0}ms", info.avg_repress_ms) } else { "-".to_string() });
-                    ui.end_row();
-                }
-            });
         }
         });
         });
@@ -1204,3 +1120,5 @@ fn banner(
         });
     ui.add_space(6.0);
 }
+
+// (ViGEmBus install helpers removed — the app is all-HIDMaestro now.)

@@ -3,6 +3,8 @@
 //! stats. Config fields are shared; stats are per-player (P1/P2), written by the
 //! DLL and read by the app.
 
+pub mod sync_window;
+
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::OnceLock;
 use windows_sys::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS, INVALID_HANDLE_VALUE};

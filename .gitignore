@@ -1,2 +1,6 @@
 /target
 /_release
+
+# debug capture (RedirectStandardError / panic hook)
+panic.txt
+out.txt

@@ -1,0 +1,16 @@
+# SDL / Steam gamepad mapping for the NOBD Controller (Branded HID mode, 1209:4E43).
+#
+# Makes the native NOBD Controller a proper "gamepad" in SDL apps and Steam
+# (A/B/X/Y etc. labelled correctly) instead of a generic joystick. XInput mode
+# needs no mapping — SDL auto-recognises the Xbox-360 identity.
+#
+# Buttons are exact from the hm-native HID descriptor + packer (report.rs):
+#   b0..b12 = A B X Y LB RB LT RT Back Start L3 R3 Guide ; hat h0 = d-pad ;
+#   left stick = a0/a1. Verified against the live device with the SDL Gamepad Tool
+#   (a/b/x/y/back/start/dpad/lefttrigger confirmed).
+#
+# Load in an SDL app via SDL_GameControllerAddMappingsFromFile, or the
+# SDL_GAMECONTROLLERCONFIG_FILE env var. Also submitted upstream to
+# mdqinc/SDL_GameControllerDB.
+
+0300000009120000434e000000000000,NOBD Controller,a:b0,b:b1,x:b2,y:b3,leftshoulder:b4,rightshoulder:b5,lefttrigger:b6,righttrigger:b7,back:b8,start:b9,leftstick:b10,rightstick:b11,guide:b12,dpup:h0.1,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,leftx:a0,lefty:a1,platform:Windows,

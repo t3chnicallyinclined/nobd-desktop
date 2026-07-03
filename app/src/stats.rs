@@ -223,6 +223,36 @@ impl GapStats {
         }
     }
 
+    /// WITH NOBD (sync window `window_ms`): NOBD groups any chord whose gap is
+    /// within the window onto the same frame, so only chords with gap > window
+    /// remain ungrouped and can still split. This is the synced-side simulation.
+    pub fn synced_split_count(&self, window_ms: f64) -> usize {
+        self.samples
+            .iter()
+            .filter(|s| {
+                !s.is_solo && s.gap_ms > window_ms && game_frame_split(s.t0_ms, s.gap_ms)
+            })
+            .count()
+    }
+
+    /// Synced 60 fps split rate (0..1) over the window, with NOBD grouping.
+    pub fn synced_split_rate(&self, window_ms: f64) -> f64 {
+        let n = self.count();
+        if n == 0 {
+            0.0
+        } else {
+            self.synced_split_count(window_ms) as f64 / n as f64
+        }
+    }
+
+    /// How many chords NOBD grouped onto the same frame (gap within the window).
+    pub fn grouped_count(&self, window_ms: f64) -> usize {
+        self.samples
+            .iter()
+            .filter(|s| !s.is_solo && s.gap_ms <= window_ms)
+            .count()
+    }
+
     /// Threshold (ms) below which a gap counts as "same USB frame".
     fn same_frame_thresh(&self) -> f64 {
         0.5 * self.frame_ms

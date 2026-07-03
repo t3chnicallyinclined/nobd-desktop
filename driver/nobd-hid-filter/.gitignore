@@ -1,0 +1,6 @@
+*.exe
+*.obj
+*.dll
+*.cat
+*.pdb
+build.log
