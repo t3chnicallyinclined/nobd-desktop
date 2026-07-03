@@ -99,6 +99,14 @@ pub struct FingerGapApp {
     sync_service: crate::sync_service::SyncService,
     /// NOBD Controller mode (branded HID vs XInput).
     pad_type: PadType,
+    /// Whether the virtual NOBD pad currently exists in Windows. Tracked (not
+    /// polled per-frame) — set at startup + updated on Enable/Disable.
+    controller_present: bool,
+    /// Last Enable failure, shown under the button (None once it succeeds).
+    setup_msg: Option<String>,
+    /// In-flight background Enable — `Some` while setup runs off the UI thread
+    /// (shows a spinner); resolves to Ok/Err on completion.
+    setup_rx: Option<std::sync::mpsc::Receiver<Result<(), String>>>,
 }
 
 impl FingerGapApp {
@@ -148,6 +156,9 @@ impl FingerGapApp {
             selected_hid_label,
             sync_service: crate::sync_service::SyncService::start(pad_type),
             pad_type,
+            controller_present: crate::nobd_setup::device_present(),
+            setup_msg: None,
+            setup_rx: None,
         }
     }
 
@@ -236,6 +247,22 @@ impl eframe::App for FingerGapApp {
         // Keep the loop ticking even while hidden so the show flag + tray check
         // marks are picked up promptly.
         ctx.request_repaint_after(std::time::Duration::from_millis(50));
+
+        // A background Enable finished — apply its result on the UI thread.
+        if let Some(rx) = &self.setup_rx {
+            if let Ok(result) = rx.try_recv() {
+                match result {
+                    Ok(()) => {
+                        self.controller_present = true;
+                        self.setup_msg = None;
+                        self.sync_service =
+                            crate::sync_service::SyncService::start(self.pad_type);
+                    }
+                    Err(e) => self.setup_msg = Some(format!("Enable failed: {e}")),
+                }
+                self.setup_rx = None;
+            }
+        }
 
         // Keep the tray menu's check marks in sync with the live config.
         if let Some(tray) = &self.tray {
@@ -467,29 +494,73 @@ impl eframe::App for FingerGapApp {
             // device *type* is an Advanced detail, defaulting to the branded
             // "NOBD Controller" (HID).
             if self.active_tab == Tab::NobdSync {
-                // One-time setup (visible until the NOBD Controller is ready).
-                if !crate::nobd_setup::is_ready(self.pad_type) {
-                    ui.horizontal(|ui| {
-                        ui.colored_label(YELLOW, "\u{25CF}");
+                // NOBD Controller device — a single Enable ⇄ Disable control.
+                // Enable installs + creates the virtual pad (elevated); Disable
+                // ejects it from Windows. This is the *device*, distinct from the
+                // in-game sync ON/OFF toggle below (which never touches the device).
+                ui.horizontal(|ui| {
+                    if self.controller_present {
+                        ui.colored_label(GREEN, "\u{25CF}");
                         if crate::nobd_setup::is_elevated() {
-                            if ui.button("Enable NOBD Controller").clicked() {
-                                if crate::nobd_setup::run_setup(self.pad_type).is_ok() {
-                                    self.sync_service =
-                                        crate::sync_service::SyncService::start(self.pad_type);
-                                }
+                            if ui.button(RichText::new("Disable NOBD Controller").color(RED)).clicked()
+                                && crate::nobd_setup::eject().is_ok()
+                            {
+                                self.controller_present = false;
+                                self.sync_service = crate::sync_service::SyncService::stopped();
+                                self.persist_ui();
                             }
                             ui.label(
-                                RichText::new("One-time: installs the NOBD Controller.")
+                                RichText::new("Ejects the virtual pad from Windows.")
                                     .size(11.0)
                                     .color(Color32::GRAY),
                             );
+                        } else {
+                            ui.label(
+                                RichText::new("NOBD Controller active (relaunch as admin to disable).")
+                                    .size(11.0)
+                                    .color(Color32::GRAY),
+                            );
+                        }
+                    } else if self.setup_rx.is_some() {
+                        // Background Enable in flight — spinner, no double-clicks.
+                        ui.spinner();
+                        ui.label(
+                            RichText::new("Enabling NOBD Controller\u{2026}")
+                                .size(12.0)
+                                .color(Color32::GRAY),
+                        );
+                    } else {
+                        ui.colored_label(YELLOW, "\u{25CF}");
+                        if crate::nobd_setup::is_elevated() {
+                            if ui.button("Enable NOBD Controller").clicked() {
+                                // Run setup off the UI thread so the window stays
+                                // responsive; the result is applied in update().
+                                let (tx, rx) = std::sync::mpsc::channel();
+                                let mode = self.pad_type;
+                                std::thread::spawn(move || {
+                                    let r = crate::nobd_setup::run_setup(mode)
+                                        .map_err(|e| e.to_string());
+                                    let _ = tx.send(r);
+                                });
+                                self.setup_rx = Some(rx);
+                                self.setup_msg = None;
+                            }
+                            if let Some(msg) = &self.setup_msg {
+                                ui.label(RichText::new(msg).size(11.0).color(RED));
+                            } else {
+                                ui.label(
+                                    RichText::new("Installs + creates the NOBD Controller.")
+                                        .size(11.0)
+                                        .color(Color32::GRAY),
+                                );
+                            }
                         } else if ui.button("Enable NOBD Controller (admin)").clicked() {
                             if crate::nobd_setup::relaunch_elevated_for_setup(self.pad_type).is_ok() {
                                 std::process::exit(0);
                             }
                         }
-                    });
-                }
+                    }
+                });
 
                 // Game-compatibility mode — tucked away; most users never open it.
                 let mut pt = self.pad_type;
@@ -499,7 +570,7 @@ impl eframe::App for FingerGapApp {
                         ui.radio_value(&mut pt, PadType::Hid, "NOBD Controller (Steam / DirectInput games)");
                         ui.radio_value(&mut pt, PadType::Xinput, "Xbox pad (for XInput-only games, e.g. MvC2)");
                         ui.label(
-                            RichText::new("Switching re-creates the device — click Enable once for the new mode.")
+                            RichText::new("Switching re-creates the device — click Enable for the new mode.")
                                 .size(11.0)
                                 .color(Color32::GRAY),
                         );
@@ -507,7 +578,10 @@ impl eframe::App for FingerGapApp {
                 );
                 if pt != self.pad_type {
                     self.pad_type = pt;
-                    self.sync_service = crate::sync_service::SyncService::start(pt);
+                    // The new mode needs its own devnode — prompt a re-Enable and
+                    // stop the (now wrong-mode) sync until the user does.
+                    self.controller_present = false;
+                    self.sync_service = crate::sync_service::SyncService::stopped();
                     self.persist_ui();
                 }
             }

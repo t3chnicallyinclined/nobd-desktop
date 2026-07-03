@@ -1,0 +1,9 @@
+# Signed driver bundle — NEVER EOL-normalize. With core.autocrlf=true, git
+# rewrites the .inf line endings on checkout, which changes its hash and breaks
+# the catalog signature -> ERROR_FILE_HASH_NOT_IN_CATALOG (0xE000024B) at driver
+# bind. The .cat is signed over these exact bytes, so they must round-trip verbatim.
+* -text
+*.inf -text
+*.cat -text binary
+*.dll -text binary
+*.cer -text binary

@@ -44,10 +44,19 @@ pub enum PadMode {
 /// One-time elevated setup for HID mode: install the vendored HID driver, create
 /// + brand the device. `cert_path`/`inf_path` point at the vendored bundle.
 pub fn setup_hid(cert_path: &str, inf_path: &str) -> io::Result<String> {
-    install::install_driver(cert_path, inf_path)?;
+    // Trust the cert + populate the DriverStore only when the package isn't
+    // already installed — on a re-Enable (after Disable) the driver is still
+    // there and only the devnode needs recreating, so skip the certutil/pnputil
+    // spawns entirely.
+    if !install::package_installed("hidmaestro.inf") {
+        install::install_driver(cert_path, inf_path)?;
+    }
     // Migrate off the old shared 1209:4E42 identity (see PID history above).
     let _ = device::remove_devices(NOBD_VID, LEGACY_PID);
     oem::clear_oem_name(NOBD_VID, LEGACY_PID);
+    // Mutually exclusive with XInput mode: tear down any XUSB companion so a mode
+    // switch never leaves two virtual pads (games / Steam would list both).
+    let _ = device::remove_devices_by_hwid(XUSB_HWID_NEEDLE);
 
     device::write_instance_config(NOBD_INDEX, NOBD_VID, NOBD_PID, NOBD_LABEL, INPUT_REPORT_LEN)?;
     let instance_id =
@@ -60,7 +69,15 @@ pub fn setup_hid(cert_path: &str, inf_path: &str) -> io::Result<String> {
 /// One-time elevated setup for XInput mode: install the vendored XUSB companion
 /// driver, write its config, and create the companion devnode (Xbox 360 id).
 pub fn setup_xinput(cert_path: &str, xusb_inf_path: &str) -> io::Result<String> {
-    install::install_driver(cert_path, xusb_inf_path)?;
+    // Skip the cert-trust + DriverStore install when already present (see setup_hid).
+    if !install::package_installed("hidmaestro_xusb.inf") {
+        install::install_driver(cert_path, xusb_inf_path)?;
+    }
+    // Mutually exclusive with HID mode: remove the branded HID pad + its OEM
+    // branding so the XUSB companion is the ONLY virtual NOBD device — and (with
+    // a non-XInput physical stick) the only XInput pad a game like MvC2 sees.
+    let _ = device::remove_devices(NOBD_VID, NOBD_PID);
+    oem::clear_oem_name(NOBD_VID, NOBD_PID);
     // The companion reads only VID/PID from Controller<N>; ReportDescriptor and
     // report length are unused by it, so pass 0.
     device::write_instance_config(NOBD_INDEX, XUSB_VID, XUSB_PID, NOBD_LABEL, 0)?;
@@ -78,6 +95,27 @@ pub fn setup_xinput(cert_path: &str, xusb_inf_path: &str) -> io::Result<String> 
 /// Remove the HID-mode OEM branding.
 pub fn clear_branding() {
     oem::clear_oem_name(NOBD_VID, NOBD_PID);
+}
+
+/// Eject the NOBD Controller entirely: remove the branded HID pad, the XUSB
+/// companion, and any legacy 4E42 node (present *and* ghost devnodes), then
+/// clear all OEM branding. The driver package stays installed so a later
+/// re-Enable is instant. Requires admin. Returns how many devnodes were removed.
+pub fn remove_all() -> u32 {
+    let mut n = 0;
+    n += device::remove_devices(NOBD_VID, NOBD_PID);
+    n += device::remove_devices(NOBD_VID, LEGACY_PID);
+    n += device::remove_devices_by_hwid(XUSB_HWID_NEEDLE);
+    oem::clear_oem_name(NOBD_VID, NOBD_PID);
+    oem::clear_oem_name(NOBD_VID, LEGACY_PID);
+    n
+}
+
+/// Whether a NOBD virtual pad currently exists in Windows (branded HID pad or
+/// XUSB companion) — present devnodes only. Drives the Enable/Disable toggle.
+pub fn is_present() -> bool {
+    let hid = format!("root\\vid_{NOBD_VID:04x}&pid_{NOBD_PID:04x}");
+    device::present_by_hwid(&hid) || device::present_by_hwid(XUSB_HWID_NEEDLE)
 }
 
 /// Whether the driver package for `mode` is installed.

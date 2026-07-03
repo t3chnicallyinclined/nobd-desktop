@@ -4,10 +4,18 @@
 //! then `pnputil /add-driver /install`. No signtool/inf2cat at runtime.
 
 use std::io;
+use std::os::windows::process::CommandExt;
 use std::process::Command;
 
+/// Don't flash a console window for each helper (certutil/pnputil) — the app is
+/// a windowless GUI, so a spawned console pops up and vanishes otherwise.
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 fn run(exe: &str, args: &[&str]) -> io::Result<()> {
-    let status = Command::new(exe).args(args).status()?;
+    let status = Command::new(exe)
+        .args(args)
+        .creation_flags(CREATE_NO_WINDOW)
+        .status()?;
     if status.success() {
         Ok(())
     } else {
@@ -24,6 +32,7 @@ pub fn install_driver(cert_path: &str, inf_path: &str) -> io::Result<()> {
     // pnputil's exit code is locale-flaky, so we verify via the DriverStore below.
     let _ = Command::new("pnputil")
         .args(["/add-driver", inf_path, "/install"])
+        .creation_flags(CREATE_NO_WINDOW)
         .status()?;
     let inf_name = std::path::Path::new(inf_path)
         .file_name()
@@ -65,7 +74,11 @@ pub fn driver_installed() -> bool {
 /// Parses `pnputil /enum-drivers` for the locale-stable `oemNN.inf` + original
 /// `hidmaestro.inf` tokens. Returns how many packages were deleted.
 pub fn uninstall_hidmaestro() -> u32 {
-    let output = match Command::new("pnputil").arg("/enum-drivers").output() {
+    let output = match Command::new("pnputil")
+        .arg("/enum-drivers")
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+    {
         Ok(o) => o,
         Err(_) => return 0,
     };
@@ -82,6 +95,7 @@ pub fn uninstall_hidmaestro() -> u32 {
         if let Some(oem) = oem {
             let _ = Command::new("pnputil")
                 .args(["/delete-driver", oem, "/uninstall", "/force"])
+                .creation_flags(CREATE_NO_WINDOW)
                 .status();
             removed += 1;
         }

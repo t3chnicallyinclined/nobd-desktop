@@ -7,8 +7,12 @@
 //! elevated, which is what the NobdNative backend needs to create its section.
 
 use std::io;
+use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
 use std::process::Command;
+
+/// Suppress the console window for the schtasks helper (windowless GUI app).
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 use windows_sys::Win32::UI::Shell::{IsUserAnAdmin, ShellExecuteW};
 
@@ -37,25 +41,33 @@ fn driver_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../hm-native/driver")
 }
 
-/// Whether the driver package for `mode` is installed.
-pub fn is_installed(mode: PadType) -> bool {
-    hm_native::install::package_installed(inf_name(mode))
-}
-
 /// Whether the current process token is elevated (admin).
 pub fn is_elevated() -> bool {
     unsafe { IsUserAnAdmin() != 0 }
 }
 
-/// The NOBD backend is usable only when the driver is installed AND we're
-/// elevated (to create the `Global\` section).
-pub fn is_ready(mode: PadType) -> bool {
-    is_installed(mode) && is_elevated()
+/// Whether a NOBD virtual pad currently exists in Windows (independent of the
+/// driver being installed) — the state the Enable/Disable toggle reflects.
+pub fn device_present() -> bool {
+    hm_native::is_present()
 }
 
 /// One-time setup (must be elevated): install the vendored driver for `mode`,
 /// create + brand the NOBD device, then register the auto-elevate login task.
+/// Logs its outcome to `TEMP\nobd-setup.log` (the GUI path swallowed errors, so
+/// a failed Enable looked like "nothing happened").
 pub fn run_setup(mode: PadType) -> io::Result<()> {
+    let r = run_setup_inner(mode);
+    let outcome = match &r {
+        Ok(()) => "OK".to_string(),
+        Err(e) => format!("FAILED: {e}"),
+    };
+    let log = std::env::temp_dir().join("nobd-setup.log");
+    let _ = std::fs::write(&log, format!("run_setup ({}): {outcome}\n", inf_name(mode)));
+    r
+}
+
+fn run_setup_inner(mode: PadType) -> io::Result<()> {
     let dir = driver_dir();
     let cer = dir.join("nobd-driver.cer");
     let inf = dir.join(inf_name(mode));
@@ -73,6 +85,16 @@ pub fn run_setup(mode: PadType) -> io::Result<()> {
     };
     let _ = register_login_task(); // best-effort — setup still succeeds without it
     Ok(())
+}
+
+/// Eject (remove) the NOBD Controller device(s): the branded HID pad and the
+/// XUSB companion. The driver package stays installed so re-Enabling is instant.
+/// Requires elevation. Returns how many devnodes were removed.
+pub fn eject() -> io::Result<u32> {
+    if !is_elevated() {
+        return Err(io::Error::other("eject requires elevation"));
+    }
+    Ok(hm_native::remove_all())
 }
 
 /// Relaunch nobd.exe elevated with `--setup-<mode>` (UAC prompt). The
@@ -116,6 +138,7 @@ fn register_login_task() -> io::Result<()> {
             &format!("\"{}\"", exe.display()),
             "/F",
         ])
+        .creation_flags(CREATE_NO_WINDOW)
         .status()?;
     if status.success() {
         Ok(())

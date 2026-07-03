@@ -138,6 +138,15 @@ impl SyncService {
         Self { stop, status, handle: Some(handle) }
     }
 
+    /// A non-running service (no thread) — the state after Eject, when the NOBD
+    /// device is gone. Reports not-active with ERR_NO_NOBD so the UI shows the
+    /// "Enable" path again.
+    pub fn stopped() -> Self {
+        let status = Arc::new(SyncStatus::new());
+        status.error.store(ERR_NO_NOBD, Ordering::Relaxed);
+        Self { stop: Arc::new(AtomicBool::new(true)), status, handle: None }
+    }
+
     pub fn is_active(&self) -> bool {
         self.status.active.load(Ordering::Relaxed)
     }

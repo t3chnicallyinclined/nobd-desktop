@@ -22,5 +22,6 @@ pub mod shared;
 pub mod swdevice;
 
 pub use controller::{
-    setup_hid, setup_xinput, NobdController, PadMode, NOBD_LABEL, NOBD_PID, NOBD_VID,
+    is_present, remove_all, setup_hid, setup_xinput, NobdController, PadMode, NOBD_LABEL, NOBD_PID,
+    NOBD_VID,
 };
