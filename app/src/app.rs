@@ -42,7 +42,6 @@ fn rec_color(ms: u32) -> Color32 {
 enum Tab {
     NobdSync,
     GapTester,
-    ButtonMonitor,
 }
 
 enum GapLogEntry {
@@ -356,11 +355,6 @@ impl eframe::App for FingerGapApp {
                     Tab::GapTester,
                     RichText::new("  Finger Gap Tester  ").size(15.0),
                 );
-                ui.selectable_value(
-                    &mut self.active_tab,
-                    Tab::ButtonMonitor,
-                    RichText::new("  Button Monitor  ").size(15.0),
-                );
             });
 
             // Decision window — the grouping verdict is judged over only the last
@@ -522,7 +516,6 @@ impl eframe::App for FingerGapApp {
         match self.active_tab {
             Tab::NobdSync => draw_nobd_sync(ctx, &self.sync_service, self.pad_type),
             Tab::GapTester => self.draw_gap_tester(ctx),
-            Tab::ButtonMonitor => self.draw_button_monitor(ctx),
         }
 
         // Persist settings whenever they change (from the panel or the tray).
@@ -943,14 +936,40 @@ fn draw_gap_tester(&self, ctx: &egui::Context) {
             ui.add_space(4.0);
 
             ui.add_space(6.0);
-            ui.label(RichText::new("— Grouping evidence —").size(12.0).color(Color32::DARK_GRAY));
-            let sf = stats.same_frame_pct();
-            draw_stat_colored(ui, "Same-frame rate", &format!("{sf:.0}%"),
-                if sf >= 30.0 { TEAL } else { GREEN });
-            draw_stat(ui, "Dead zone", &format!("{} frame(s)", stats.dead_zone_frames()));
-            draw_stat(ui, "Solo presses", &format!("{}", stats.solo_count()));
-            draw_stat(ui, "Distinct chords", &format!("{}", stats.distinct_chords()));
-            draw_stat(ui, "USB frame size", &format!("{:.2}ms", stats.frame_ms()));
+            egui::CollapsingHeader::new(RichText::new("Grouping evidence").size(12.0).color(Color32::GRAY))
+                .id_salt(format!("gap_details_{cidx}"))
+                .show(ui, |ui| {
+                    let sf = stats.same_frame_pct();
+                    draw_stat_colored(ui, "Same-frame rate", &format!("{sf:.0}%"),
+                        if sf >= 30.0 { TEAL } else { GREEN });
+                    draw_stat(ui, "Dead zone", &format!("{} frame(s)", stats.dead_zone_frames()));
+                    draw_stat(ui, "Solo presses", &format!("{}", stats.solo_count()));
+                    draw_stat(ui, "Distinct chords", &format!("{}", stats.distinct_chords()));
+                    draw_stat(ui, "USB frame size", &format!("{:.2}ms", stats.frame_ms()));
+                });
+
+            // Per-button details (rolled in from the old Button Monitor tab).
+            let infos = self.monitor.button_infos(*cidx);
+            if !infos.is_empty() {
+                egui::CollapsingHeader::new(RichText::new("Per-button (hold / repress)").size(12.0).color(Color32::GRAY))
+                    .id_salt(format!("btn_details_{cidx}"))
+                    .show(ui, |ui| {
+                        egui::Grid::new(format!("bstats_{cidx}")).striped(true).min_col_width(44.0).show(ui, |ui| {
+                            ui.label(RichText::new("Btn").strong().color(TEAL));
+                            ui.label(RichText::new("#").strong().color(TEAL));
+                            ui.label(RichText::new("Hold").strong().color(TEAL));
+                            ui.label(RichText::new("Repress").strong().color(TEAL));
+                            ui.end_row();
+                            for info in &infos {
+                                ui.label(&info.name);
+                                ui.label(format!("{}", info.press_count));
+                                ui.label(if info.avg_hold_ms > 0.0 { format!("{:.0}ms", info.avg_hold_ms) } else { "-".into() });
+                                ui.label(if info.avg_repress_ms > 0.0 { format!("{:.0}ms", info.avg_repress_ms) } else { "-".into() });
+                                ui.end_row();
+                            }
+                        });
+                    });
+            }
         }
 
         // Report-rate footnote (low ≈ Steam Input resampling; use native XInput).
@@ -963,110 +982,6 @@ fn draw_gap_tester(&self, ctx: &egui::Context) {
             );
         }
 
-        }
-        });
-        });
-    });
-}
-}
-
-// ─── BUTTON MONITOR TAB ───
-
-impl FingerGapApp {
-fn draw_button_monitor(&self, ctx: &egui::Context) {
-    let controllers = self
-        .input
-        .as_ref()
-        .map(|i| i.controllers())
-        .unwrap_or_default();
-
-    egui::TopBottomPanel::bottom("monitor_log")
-        .min_height(140.0)
-        .resizable(true)
-        .show(ctx, |ui| {
-            ui.heading("Event Log (all controllers)");
-            ui.separator();
-            ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
-                for entry in self.monitor.event_log().iter().rev() {
-                    ui.horizontal(|ui| {
-                        let color = if entry.event_type == "PRESS" { GREEN } else { Color32::GRAY };
-                        ui.monospace(
-                            RichText::new(format!(
-                                "[C{}] {:<14} {:<8} {}",
-                                entry.controller + 1, entry.button_name, entry.event_type, entry.detail,
-                            ))
-                            .color(color),
-                        );
-                    });
-                }
-            });
-        });
-
-    egui::CentralPanel::default().show(ctx, |ui| {
-        if controllers.is_empty() {
-            ui.add_space(40.0);
-            ui.vertical_centered(|ui| {
-                ui.label(
-                    RichText::new("Connect a controller and press any button")
-                        .size(16.0).color(Color32::GRAY),
-                );
-                ui.label(
-                    RichText::new("Hold duration, repress timing & activation stats — per controller")
-                        .size(13.0).color(Color32::DARK_GRAY),
-                );
-            });
-            return;
-        }
-        ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
-        ui.columns(controllers.len(), |cols| {
-        for (ci, (cidx, cname)) in controllers.iter().enumerate() {
-            let ui = &mut cols[ci];
-            let infos = self.monitor.button_infos(*cidx);
-            ui.label(
-                RichText::new(format!("C{}: {cname}", cidx + 1))
-                    .strong().size(14.0)
-                    .color(if infos.is_empty() { Color32::GRAY } else { TEAL }),
-            );
-            ui.separator();
-            if infos.is_empty() {
-                ui.weak("Press any button…");
-                continue;
-            }
-
-            // Active buttons
-            ui.horizontal_wrapped(|ui| {
-                for info in &infos {
-                    let (color, tc) = if info.held {
-                        (TEAL, Color32::BLACK)
-                    } else {
-                        (Color32::from_rgb(40, 40, 50), Color32::GRAY)
-                    };
-                    egui::Frame::new()
-                        .inner_margin(egui::vec2(8.0, 4.0))
-                        .corner_radius(4.0)
-                        .fill(color)
-                        .show(ui, |ui| {
-                            ui.label(RichText::new(&info.name).strong().color(tc));
-                        });
-                }
-            });
-            ui.add_space(6.0);
-
-            // Per-button stats (compact for the column).
-            egui::Grid::new(format!("bstats_{cidx}")).striped(true).min_col_width(48.0).show(ui, |ui| {
-                ui.label(RichText::new("Btn").strong().color(TEAL));
-                ui.label(RichText::new("#").strong().color(TEAL));
-                ui.label(RichText::new("Avg hold").strong().color(TEAL));
-                ui.label(RichText::new("Avg repress").strong().color(TEAL));
-                ui.end_row();
-                for info in &infos {
-                    ui.label(&info.name);
-                    ui.label(format!("{}", info.press_count));
-                    ui.label(if info.avg_hold_ms > 0.0 { format!("{:.0}ms", info.avg_hold_ms) } else { "-".to_string() });
-                    ui.label(if info.avg_repress_ms > 0.0 { format!("{:.0}ms", info.avg_repress_ms) } else { "-".to_string() });
-                    ui.end_row();
-                }
-            });
         }
         });
         });
