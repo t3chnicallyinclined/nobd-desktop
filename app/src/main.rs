@@ -37,11 +37,31 @@ fn main() -> eframe::Result {
     // Relaunched elevated for one-time NOBD Controller setup: install the driver
     // + create the device before the GUI comes up, then continue as the (now
     // elevated) app. Best-effort; the UI reflects success/failure.
-    if nobd_setup::is_elevated() {
-        if std::env::args().any(|a| a == "--setup-xinput") {
-            let _ = nobd_setup::run_setup(sync_service::PadType::Xinput);
+    {
+        let mode = if std::env::args().any(|a| a == "--setup-xinput") {
+            Some(sync_service::PadType::Xinput)
         } else if std::env::args().any(|a| a == "--setup-hid") {
-            let _ = nobd_setup::run_setup(sync_service::PadType::Hid);
+            Some(sync_service::PadType::Hid)
+        } else {
+            None
+        };
+        if let Some(m) = mode {
+            // Log the outcome — setup runs before the GUI and errors were being
+            // swallowed, so a failed migrate looked like "nothing happened".
+            let log = std::env::temp_dir().join("nobd-setup.log");
+            let result = if !nobd_setup::is_elevated() {
+                "requested but NOT elevated".to_string()
+            } else {
+                match nobd_setup::run_setup(m) {
+                    Ok(()) => "OK".to_string(),
+                    Err(e) => format!("FAILED: {e}"),
+                }
+            };
+            let mode_name = match m {
+                sync_service::PadType::Hid => "Hid",
+                sync_service::PadType::Xinput => "Xinput",
+            };
+            let _ = std::fs::write(&log, format!("setup ({mode_name}): {result}\n"));
         }
     }
 
