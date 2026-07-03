@@ -127,7 +127,6 @@ pub struct StrayPress {
     pub button: Button,
     pub solo_ms: f64,
     pub reason: StrayReason,
-    pub off_time_ms: Option<f64>,
     pub controller: usize,
 }
 
@@ -150,12 +149,6 @@ pub struct BounceEvent {
     pub button: Button,
     pub off_ms: f64,
     pub controller: usize,
-}
-
-#[derive(Clone)]
-pub enum InputEvent {
-    Pressed(Button),
-    Released(Button),
 }
 
 pub(crate) enum InputMsg {
@@ -228,27 +221,17 @@ impl ButtonKey {
 struct PadState {
     cluster: Option<Cluster>,
     last_release: HashMap<ButtonKey, Instant>,
-    last_press: HashMap<ButtonKey, Instant>,
 }
 
 impl PadState {
     fn new() -> Self {
-        Self { cluster: None, last_release: HashMap::new(), last_press: HashMap::new() }
-    }
-
-    fn off_time_ms(&self, button: Button) -> Option<f64> {
-        let key = ButtonKey::from_button(button);
-        let release = self.last_release.get(&key)?;
-        let press = self.last_press.get(&key)?;
-        let off = press.duration_since(*release).as_secs_f64() * 1000.0;
-        if off >= 0.0 { Some(off) } else { None }
+        Self { cluster: None, last_release: HashMap::new() }
     }
 }
 
 /// Turn a closed cluster into a pair (≥2 distinct buttons) or a stray (1).
 fn finalize_cluster(
     cl: &Cluster,
-    pad: &PadState,
     c: usize,
     single_reason: StrayReason,
     result: &mut PollResult,
@@ -269,7 +252,6 @@ fn finalize_cluster(
             button: b,
             solo_ms: ts.elapsed().as_secs_f64() * 1000.0,
             reason: single_reason,
-            off_time_ms: pad.off_time_ms(b),
             controller: c,
         });
     }
@@ -279,8 +261,6 @@ pub struct PollResult {
     pub pairs: Vec<ButtonPair>,
     pub strays: Vec<StrayPress>,
     pub bounces: Vec<BounceEvent>,
-    /// Raw press/release events, tagged with their controller index.
-    pub events: Vec<(usize, InputEvent)>,
 }
 
 pub struct GamepadInput {
@@ -450,7 +430,6 @@ impl GamepadInput {
             pairs: Vec::new(),
             strays: Vec::new(),
             bounces: Vec::new(),
-            events: Vec::new(),
         };
 
         while let Ok(msg) = self.rx.try_recv() {
@@ -470,7 +449,6 @@ impl GamepadInput {
                 }
                 InputMsg::Pressed(c, button, timestamp) => {
                     self.ensure_slot(c);
-                    result.events.push((c, InputEvent::Pressed(button)));
                     if !is_attack(button) {
                         continue; // directions / system buttons don't pair
                     }
@@ -483,7 +461,6 @@ impl GamepadInput {
                             result.bounces.push(BounceEvent { button, off_ms, controller: c });
                         }
                     }
-                    pad.last_press.insert(key, timestamp);
 
                     // How does this press relate to the open chord cluster?
                     let act = match &pad.cluster {
@@ -507,14 +484,13 @@ impl GamepadInput {
                         }
                         ClusterAct::Restart => {
                             let old = pad.cluster.take().unwrap();
-                            finalize_cluster(&old, pad, c, StrayReason::NoPairArrived, &mut result);
+                            finalize_cluster(&old, c, StrayReason::NoPairArrived, &mut result);
                             pad.cluster = Some(Cluster::new(button, timestamp));
                         }
                     }
                 }
                 InputMsg::Released(c, button, timestamp) => {
                     self.ensure_slot(c);
-                    result.events.push((c, InputEvent::Released(button)));
                     if !is_attack(button) {
                         continue;
                     }
@@ -527,7 +503,7 @@ impl GamepadInput {
                     let is_member = pad.cluster.as_ref().map_or(false, |cl| cl.contains(button));
                     if is_member {
                         let old = pad.cluster.take().unwrap();
-                        finalize_cluster(&old, pad, c, StrayReason::ReleasedBeforePair, &mut result);
+                        finalize_cluster(&old, c, StrayReason::ReleasedBeforePair, &mut result);
                     }
                 }
             }
@@ -541,7 +517,7 @@ impl GamepadInput {
                 .map_or(false, |cl| cl.last().1.elapsed().as_secs_f64() * 1000.0 > PAIR_WINDOW_MS);
             if expired {
                 let old = pad.cluster.take().unwrap();
-                finalize_cluster(&old, pad, c, StrayReason::NoPairArrived, &mut result);
+                finalize_cluster(&old, c, StrayReason::NoPairArrived, &mut result);
             }
         }
 

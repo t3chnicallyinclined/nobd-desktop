@@ -2,8 +2,7 @@ use eframe::egui;
 use egui::{Color32, RichText, ScrollArea, Ui};
 
 use crate::hid::{list_hid_gamepads, HidDeviceId, HidDeviceInfo};
-use crate::input::{format_button, GamepadInput, InputEvent, InputSourceKind};
-use crate::monitor::ButtonMonitor;
+use crate::input::{format_button, GamepadInput, InputSourceKind};
 use crate::stats::GapStats;
 use crate::sync_service::PadType;
 
@@ -52,7 +51,6 @@ enum GapLogEntry {
         button_b: String,
         count: usize,
         gap_ms: f64,
-        running_avg: f64,
         /// Would a 60 fps game have read the two presses on different frames?
         split: bool,
     },
@@ -61,7 +59,6 @@ enum GapLogEntry {
         button: String,
         solo_ms: f64,
         reason: &'static str,
-        off_time_ms: Option<f64>,
     },
     Bounce {
         controller: usize,
@@ -79,7 +76,6 @@ pub struct FingerGapApp {
     // Monotonic chords per controller (the log's "#N", independent of the window).
     total_pairs: Vec<usize>,
     gap_log: Vec<GapLogEntry>,
-    monitor: ButtonMonitor,
     active_tab: Tab,
     error_msg: Option<String>,
     tray: Option<crate::tray::Tray>,
@@ -161,7 +157,6 @@ impl FingerGapApp {
             bounce_counts: Vec::new(),
             total_pairs: Vec::new(),
             gap_log: Vec::new(),
-            monitor: ButtonMonitor::new(),
             active_tab: Tab::NobdSync,
             error_msg,
             tray: crate::tray::spawn(ctx.clone()),
@@ -190,7 +185,6 @@ impl FingerGapApp {
         self.bounce_counts.clear();
         self.total_pairs.clear();
         self.gap_log.clear();
-        self.monitor.clear();
     }
 
     /// Drop the current input backend and start a new one on `source`. Dropping
@@ -506,12 +500,6 @@ impl eframe::App for FingerGapApp {
         // Poll gamepad — pairs/strays/bounces are tagged per controller now.
         let poll = self.input.as_mut().map(|i| i.poll());
         if let Some(result) = poll {
-            for (c, ev) in &result.events {
-                match ev {
-                    InputEvent::Pressed(btn) => self.monitor.on_press(*c, *btn),
-                    InputEvent::Released(btn) => self.monitor.on_release(*c, *btn),
-                }
-            }
             // Measured USB frame size (ms) so same-frame bucketing adapts to the
             // device cadence; and the current decision window. Read once here to
             // avoid borrowing self.input while mutating self.stats below.
@@ -531,7 +519,6 @@ impl eframe::App for FingerGapApp {
                     self.stats[c].set_frame_ms(fm);
                 }
                 self.stats[c].record_chord(pair.gap_ms, &pair.buttons, pair.t0_ms);
-                let running_avg = self.stats[c].average();
                 self.total_pairs[c] += 1;
                 let attempt = self.total_pairs[c];
                 // Would a free-running 60fps game poll have split this chord?
@@ -543,7 +530,6 @@ impl eframe::App for FingerGapApp {
                     button_b: format_button(pair.button_b),
                     count: pair.count,
                     gap_ms: pair.gap_ms,
-                    running_avg,
                     split,
                 });
             }
@@ -560,7 +546,6 @@ impl eframe::App for FingerGapApp {
                     button: format_button(stray.button),
                     solo_ms: stray.solo_ms,
                     reason: stray.reason.label(),
-                    off_time_ms: stray.off_time_ms,
                 });
             }
             for bounce in result.bounces {

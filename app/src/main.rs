@@ -6,7 +6,6 @@ mod hid;
 mod hidhide;
 mod input;
 mod logo;
-mod monitor;
 mod nobd_setup;
 mod persist;
 mod stats;

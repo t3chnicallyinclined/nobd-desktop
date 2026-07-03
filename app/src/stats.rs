@@ -72,10 +72,6 @@ impl GapStats {
         self.trim();
     }
 
-    pub fn window(&self) -> usize {
-        self.window
-    }
-
     fn trim(&mut self) {
         while self.samples.len() > self.window {
             self.samples.pop_front();
@@ -88,10 +84,6 @@ impl GapStats {
         if ms.is_finite() && ms > 0.0 {
             self.frame_ms = ms.clamp(0.2, 8.0);
         }
-    }
-
-    pub fn frame_ms(&self) -> f64 {
-        self.frame_ms
     }
 
     /// Record a detected chord: its spread gap, the buttons, and the first-press
@@ -213,16 +205,6 @@ impl GapStats {
             .count()
     }
 
-    /// Realized 60 fps split rate (0..1) over the window.
-    pub fn simulated_split_rate(&self) -> f64 {
-        let n = self.count();
-        if n == 0 {
-            0.0
-        } else {
-            self.simulated_split_count() as f64 / n as f64
-        }
-    }
-
     /// WITH NOBD (sync window `window_ms`): NOBD groups any chord whose gap is
     /// within the window onto the same frame, so only chords with gap > window
     /// remain ungrouped and can still split. This is the synced-side simulation.
@@ -233,16 +215,6 @@ impl GapStats {
                 !s.is_solo && s.gap_ms > window_ms && game_frame_split(s.t0_ms, s.gap_ms)
             })
             .count()
-    }
-
-    /// Synced 60 fps split rate (0..1) over the window, with NOBD grouping.
-    pub fn synced_split_rate(&self, window_ms: f64) -> f64 {
-        let n = self.count();
-        if n == 0 {
-            0.0
-        } else {
-            self.synced_split_count(window_ms) as f64 / n as f64
-        }
     }
 
     /// How many chords NOBD grouped onto the same frame (gap within the window).
@@ -363,9 +335,5 @@ impl GapStats {
     /// How many more chords until a verdict locks in (0 = ready).
     pub fn samples_until_verdict(&self) -> usize {
         self.required().saturating_sub(self.count())
-    }
-
-    pub fn clear(&mut self) {
-        self.samples.clear();
     }
 }
