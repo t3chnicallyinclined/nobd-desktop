@@ -38,7 +38,10 @@ pub enum PadType {
 
 impl PadType {
     pub fn from_u32(n: u32) -> Self {
-        if n == 1 {
+        // Branded HID is the default. Only the explicit XInput marker (100)
+        // selects XInput — old ViGEm pad_type values (0/1/2) all fall through
+        // to Hid, so a migrating user isn't stuck on the wrong mode.
+        if n == 100 {
             PadType::Xinput
         } else {
             PadType::Hid
@@ -47,7 +50,7 @@ impl PadType {
     pub fn as_u32(self) -> u32 {
         match self {
             PadType::Hid => 0,
-            PadType::Xinput => 1,
+            PadType::Xinput => 100,
         }
     }
     pub fn mode(self) -> hm_native::PadMode {
