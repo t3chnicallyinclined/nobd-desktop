@@ -61,6 +61,17 @@ impl PadType {
     }
 }
 
+/// Where the sync loop reads the real controller from.
+#[derive(Clone)]
+pub enum SyncSource {
+    /// XInput (Xbox pads) — scans slots 0-3. The default.
+    XInput,
+    /// A raw HID (DirectInput) stick read directly. Required to feed a
+    /// non-XInput stick into an XInput-only game (the companion becomes the only
+    /// XInput pad the game sees).
+    Hid(crate::hid::HidDeviceId),
+}
+
 type XInputGetStateFn = unsafe extern "system" fn(u32, *mut XINPUT_STATE) -> u32;
 
 /// Resolve XInputGetState from System32 (the static windows-sys symbol hangs on
@@ -127,13 +138,13 @@ pub struct SyncService {
 }
 
 impl SyncService {
-    pub fn start(pad: PadType) -> Self {
+    pub fn start(pad: PadType, source: SyncSource) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let status = Arc::new(SyncStatus::new());
         let handle = {
             let stop = stop.clone();
             let status = status.clone();
-            std::thread::spawn(move || run(stop, status, pad))
+            std::thread::spawn(move || run(stop, status, pad, source))
         };
         Self { stop, status, handle: Some(handle) }
     }
@@ -188,7 +199,66 @@ impl Drop for SyncService {
     }
 }
 
-fn run(stop: Arc<AtomicBool>, status: Arc<SyncStatus>, pad: PadType) {
+fn run(stop: Arc<AtomicBool>, status: Arc<SyncStatus>, pad: PadType, source: SyncSource) {
+    match source {
+        SyncSource::XInput => run_xinput(stop, status, pad),
+        SyncSource::Hid(id) => run_hid(stop, status, pad, id),
+    }
+}
+
+/// Read a raw HID (DirectInput) stick and present the grouped result as the NOBD
+/// pad. This is the path that lets a non-XInput stick drive sync into an
+/// XInput-only game: the stick feeds here, the XUSB companion is the only XInput
+/// device the game sees.
+fn run_hid(
+    stop: Arc<AtomicBool>,
+    status: Arc<SyncStatus>,
+    pad: PadType,
+    id: crate::hid::HidDeviceId,
+) {
+    // Full-state reader publishes into `snap` at the stick's report rate.
+    let snap = crate::hid::HidSnapshot::new();
+    {
+        let snap = snap.clone();
+        std::thread::spawn(move || crate::hid::run_state_reader(id, snap));
+    }
+
+    let mut ctrl = match hm_native::NobdController::open(pad.mode()) {
+        Ok(c) => c,
+        Err(_) => {
+            status.error.store(ERR_NO_NOBD, Ordering::Relaxed);
+            return;
+        }
+    };
+
+    unsafe { timeBeginPeriod(1) };
+    status.active.store(true, Ordering::Relaxed);
+    status.error.store(ERR_NONE, Ordering::Relaxed);
+
+    let epoch = Instant::now();
+    let mut sync = SyncWindow::new();
+
+    while !stop.load(Ordering::Relaxed) {
+        let now_us = epoch.elapsed().as_micros() as u64;
+        let s = nobd_shared::state();
+        let enabled = s.enabled.load(Ordering::Relaxed) != 0;
+        let window_us = s.window_ms[0].load(Ordering::Relaxed).clamp(1, 16) * 1000;
+
+        let (buttons, lt, rt, lx, ly) = snap.read();
+        status.real_present.store(snap.is_present(), Ordering::Relaxed);
+        let grouped = sync.process(buttons, ATTACK_MASK, ATTACK_MASK, now_us, window_us, enabled);
+        // Right stick stays centered — a stick's directions come from the d-pad
+        // (mirrored to the left stick by the reader).
+        ctrl.submit(grouped, lt, rt, lx, ly, 0, 0);
+
+        std::thread::sleep(Duration::from_micros(1000)); // ~1 kHz
+    }
+
+    snap.stop();
+    status.active.store(false, Ordering::Relaxed);
+}
+
+fn run_xinput(stop: Arc<AtomicBool>, status: Arc<SyncStatus>, pad: PadType) {
     let xi = match load_xinput() {
         Some(f) => f,
         None => {

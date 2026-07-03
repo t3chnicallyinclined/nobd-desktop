@@ -11,7 +11,9 @@
 use crate::input::InputMsg;
 use gilrs::Button;
 use std::ffi::c_void;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::Sender;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use windows_sys::core::GUID;
@@ -22,7 +24,7 @@ use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
 };
 use windows_sys::Win32::Devices::HumanInterfaceDevice::{
     HidD_GetAttributes, HidD_GetHidGuid, HidD_GetPreparsedData, HidD_GetProductString,
-    HidD_FreePreparsedData, HidP_GetButtonCaps, HidP_GetCaps, HidP_GetUsages,
+    HidD_FreePreparsedData, HidP_GetButtonCaps, HidP_GetCaps, HidP_GetUsageValue, HidP_GetUsages,
     HidP_MaxUsageListLength, HIDD_ATTRIBUTES, HIDP_BUTTON_CAPS, HIDP_CAPS, HidP_Input,
 };
 use windows_sys::Win32::Foundation::{
@@ -459,6 +461,252 @@ fn publish_due(last: &mut Instant) -> bool {
         true
     } else {
         false
+    }
+}
+
+// ─────────────────────── full-state reader (for the sync service) ───────────────────────
+//
+// The Gap Tester reader above emits button *events* for chord analysis. The sync
+// service instead needs the COMPLETE gamepad state each report, in XInput layout,
+// so it can run the NOBD window and re-emit the grouped result to the XUSB
+// companion. `run_state_reader` decodes buttons (via the same GP2040-matched map),
+// the d-pad (hat, usage 0x39), and L2/R2 into a lock-free `HidSnapshot`.
+
+/// XInput-layout snapshot of a HID gamepad, packed into two atomics so the ~1 kHz
+/// reader and the ~1 kHz sync loop never block each other.
+pub struct HidSnapshot {
+    /// buttons[0..16] (XInput wButtons layout) | lt[16..24] | rt[24..32]
+    btn_trig: AtomicU32,
+    /// lx (low 16, i16-as-u16) | ly (high 16)
+    left_stick: AtomicU32,
+    present: AtomicBool,
+    stop: AtomicBool,
+}
+
+impl HidSnapshot {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            btn_trig: AtomicU32::new(0),
+            left_stick: AtomicU32::new(0), // 0/0 = centered
+            present: AtomicBool::new(false),
+            stop: AtomicBool::new(false),
+        })
+    }
+
+    /// Ask the reader thread to exit (device handle closes, thread returns).
+    pub fn stop(&self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether the reader has an open device delivering reports.
+    pub fn is_present(&self) -> bool {
+        self.present.load(Ordering::Relaxed)
+    }
+
+    /// Latest state as `(buttons, lt, rt, lx, ly)` — the args the sync loop feeds
+    /// to `NobdController::submit` (right stick stays centered for a stick).
+    pub fn read(&self) -> (u16, u8, u8, i16, i16) {
+        let bt = self.btn_trig.load(Ordering::Relaxed);
+        let ls = self.left_stick.load(Ordering::Relaxed);
+        (
+            (bt & 0xFFFF) as u16,
+            ((bt >> 16) & 0xFF) as u8,
+            ((bt >> 24) & 0xFF) as u8,
+            (ls & 0xFFFF) as u16 as i16,
+            ((ls >> 16) & 0xFFFF) as u16 as i16,
+        )
+    }
+
+    fn write(&self, buttons: u16, lt: u8, rt: u8, lx: i16, ly: i16) {
+        let bt = (buttons as u32) | ((lt as u32) << 16) | ((rt as u32) << 24);
+        let ls = (lx as u16 as u32) | ((ly as u16 as u32) << 16);
+        self.btn_trig.store(bt, Ordering::Relaxed);
+        self.left_stick.store(ls, Ordering::Relaxed);
+    }
+}
+
+/// HID button index (GP2040 DInput order, matching `HID_BUTTON_MAP`) → XInput
+/// state. L2/R2 are digital on a stick, so they deflect the analog triggers fully.
+fn apply_hid_button(idx: usize, buttons: &mut u16, lt: &mut u8, rt: &mut u8) {
+    match idx {
+        0 => *buttons |= 0x1000,  // A / Cross
+        1 => *buttons |= 0x2000,  // B / Circle
+        2 => *buttons |= 0x4000,  // X / Square
+        3 => *buttons |= 0x8000,  // Y / Triangle
+        4 => *buttons |= 0x0100,  // LB / L1
+        5 => *buttons |= 0x0200,  // RB / R1
+        6 => *lt = 255,           // LT / L2
+        7 => *rt = 255,           // RT / R2
+        8 => *buttons |= 0x0020,  // Back / Select
+        9 => *buttons |= 0x0010,  // Start
+        10 => *buttons |= 0x0040, // L3
+        11 => *buttons |= 0x0080, // R3
+        12 => *buttons |= 0x0400, // Guide
+        _ => {}
+    }
+}
+
+/// 8-way hat (usage 0x39, 0=Up … 7=Up-Left, >=8 neutral) → XInput d-pad bits +
+/// mirrored left stick, so games reading either the d-pad or the stick both move.
+fn apply_hat(dir: u32, buttons: &mut u16, lx: &mut i16, ly: &mut i16) {
+    let (up, right, down, left) = match dir {
+        0 => (true, false, false, false),
+        1 => (true, true, false, false),
+        2 => (false, true, false, false),
+        3 => (false, true, true, false),
+        4 => (false, false, true, false),
+        5 => (false, false, true, true),
+        6 => (false, false, false, true),
+        7 => (true, false, false, true),
+        _ => return, // neutral
+    };
+    if up {
+        *buttons |= 0x0001;
+        *ly = 32767;
+    }
+    if down {
+        *buttons |= 0x0002;
+        *ly = -32768;
+    }
+    if left {
+        *buttons |= 0x0004;
+        *lx = -32768;
+    }
+    if right {
+        *buttons |= 0x0008;
+        *lx = 32767;
+    }
+}
+
+/// Full-state HID reader loop (background thread). Opens `id`, and on each report
+/// decodes the whole gamepad into `snap` (XInput layout). Returns when the device
+/// errors out or `snap.stop()` is called.
+pub fn run_state_reader(id: HidDeviceId, snap: Arc<HidSnapshot>) {
+    unsafe {
+        let wpath = to_wide(&id.path);
+        let h = CreateFileW(
+            wpath.as_ptr(),
+            FILE_GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_OVERLAPPED,
+            0,
+        );
+        if h == INVALID_HANDLE_VALUE {
+            return;
+        }
+
+        let mut pp: isize = 0;
+        if HidD_GetPreparsedData(h, &mut pp) == 0 {
+            CloseHandle(h);
+            return;
+        }
+        let mut caps: HIDP_CAPS = std::mem::zeroed();
+        if HidP_GetCaps(pp, &mut caps) != HIDP_STATUS_SUCCESS {
+            cleanup(h, pp);
+            return;
+        }
+        let report_len = caps.InputReportByteLength as usize;
+        if report_len == 0 {
+            cleanup(h, pp);
+            return;
+        }
+
+        let mut nbtn = caps.NumberInputButtonCaps;
+        let mut btn_caps: HIDP_BUTTON_CAPS = std::mem::zeroed();
+        if nbtn == 0
+            || HidP_GetButtonCaps(HidP_Input, &mut btn_caps, &mut nbtn, pp) != HIDP_STATUS_SUCCESS
+        {
+            cleanup(h, pp);
+            return;
+        }
+        let button_page = btn_caps.UsagePage;
+        let usage_min = btn_caps.Anonymous.Range.UsageMin;
+        let max_usages = HidP_MaxUsageListLength(HidP_Input, button_page, pp).max(1) as usize;
+
+        let event = CreateEventW(std::ptr::null(), 1, 0, std::ptr::null());
+        if event == 0 {
+            cleanup(h, pp);
+            return;
+        }
+        let mut ov: OVERLAPPED = std::mem::zeroed();
+        ov.hEvent = event;
+
+        let mut report = vec![0u8; report_len];
+        let mut usage_buf = vec![0u16; max_usages];
+        snap.present.store(true, Ordering::Relaxed);
+
+        loop {
+            if snap.stop.load(Ordering::Relaxed) {
+                break;
+            }
+            ResetEvent(event);
+            let mut got: u32 = 0;
+            let rf = ReadFile(h, report.as_mut_ptr(), report_len as u32, std::ptr::null_mut(), &mut ov);
+            if rf == 0 {
+                if GetLastError() != ERROR_IO_PENDING {
+                    break;
+                }
+                // Wait for THIS read; wake every 100 ms to honour stop().
+                loop {
+                    if WaitForSingleObject(event, 100) == WAIT_OBJECT_0 {
+                        break;
+                    }
+                    if snap.stop.load(Ordering::Relaxed) {
+                        CancelIo(h);
+                        cleanup(h, pp);
+                        snap.present.store(false, Ordering::Relaxed);
+                        return;
+                    }
+                }
+            }
+            if GetOverlappedResult(h, &ov, &mut got, 0) == 0 {
+                break;
+            }
+
+            // Decode the full state for this report.
+            let (mut buttons, mut lt, mut rt, mut lx, mut ly) = (0u16, 0u8, 0u8, 0i16, 0i16);
+
+            let mut count = usage_buf.len() as u32;
+            let st = HidP_GetUsages(
+                HidP_Input,
+                button_page,
+                0,
+                usage_buf.as_mut_ptr(),
+                &mut count,
+                pp,
+                report.as_mut_ptr() as *mut u8,
+                got,
+            );
+            if st == HIDP_STATUS_SUCCESS {
+                for &u in &usage_buf[..count as usize] {
+                    apply_hid_button((u.wrapping_sub(usage_min)) as usize, &mut buttons, &mut lt, &mut rt);
+                }
+            }
+
+            // D-pad: generic-desktop (0x01) hat switch (0x39).
+            let mut hat: u32 = 0;
+            if HidP_GetUsageValue(
+                HidP_Input,
+                0x01,
+                0,
+                0x39,
+                &mut hat,
+                pp,
+                report.as_mut_ptr() as *mut u8,
+                got,
+            ) == HIDP_STATUS_SUCCESS
+            {
+                apply_hat(hat, &mut buttons, &mut lx, &mut ly);
+            }
+
+            snap.write(buttons, lt, rt, lx, ly);
+        }
+
+        CancelIo(h);
+        cleanup(h, pp);
+        snap.present.store(false, Ordering::Relaxed);
     }
 }
 

@@ -137,6 +137,12 @@ impl FingerGapApp {
             Ok(gi) => (Some(gi), None),
             Err(e) => (None, Some(format!("Gamepad init failed: {e}"))),
         };
+        // The sync service reads the SAME source as the Gap Tester (a HID stick
+        // if one is selected, else XInput).
+        let sync_src = match (source_kind, &selected_hid) {
+            (SourceKind::Hid, Some(id)) => crate::sync_service::SyncSource::Hid(id.clone()),
+            _ => crate::sync_service::SyncSource::XInput,
+        };
         Self {
             input,
             stats: Vec::new(),
@@ -154,7 +160,7 @@ impl FingerGapApp {
             hid_devices,
             selected_hid,
             selected_hid_label,
-            sync_service: crate::sync_service::SyncService::start(pad_type),
+            sync_service: crate::sync_service::SyncService::start(pad_type, sync_src),
             pad_type,
             controller_present: crate::nobd_setup::device_present(),
             setup_msg: None,
@@ -189,6 +195,117 @@ impl FingerGapApp {
             }
         }
         self.reset_local_stats();
+    }
+
+    /// Shared input-source picker (XInput vs a raw HID stick + device). Used on
+    /// both tabs: it drives the Gap Tester's reader AND the sync service's input,
+    /// so the synced output follows whichever stick you select here. To feed a
+    /// non-XInput stick into an XInput-only game, pick "DirectInput fightstick".
+    fn input_source_picker(&mut self, ui: &mut Ui) {
+        // Work on LOCAL copies inside the egui closures, then write back + apply
+        // after — avoids nested mutable borrows of `self`.
+        let mut kind = self.source_kind;
+        let mut selected = self.selected_hid.clone();
+        let mut label = self.selected_hid_label.clone();
+        // Only your real sticks — hide the NOBD virtual pad (our pid.codes VID).
+        let devices: Vec<_> = self
+            .hid_devices
+            .clone()
+            .into_iter()
+            .filter(|d| d.id.vid != 0x1209)
+            .collect();
+        let mut do_refresh = false;
+        let mut pending_source: Option<InputSourceKind> = None;
+
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Controller").size(12.0).color(Color32::GRAY));
+            egui::ComboBox::from_id_salt("input_source")
+                .selected_text(match kind {
+                    SourceKind::XInput => "Xbox / XInput sticks",
+                    SourceKind::Hid => "DirectInput fightstick",
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut kind, SourceKind::XInput, "Xbox / XInput sticks (auto)");
+                    ui.selectable_value(&mut kind, SourceKind::Hid, "DirectInput fightstick");
+                });
+
+            if kind == SourceKind::Hid {
+                let sel_text = if label.is_empty() {
+                    "Select device…".to_owned()
+                } else {
+                    label.clone()
+                };
+                egui::ComboBox::from_id_salt("hid_device")
+                    .selected_text(sel_text)
+                    .show_ui(ui, |ui| {
+                        if devices.is_empty() {
+                            ui.label(
+                                RichText::new("No HID gamepads — Xbox pads aren't usable here; use a DInput stick")
+                                    .size(11.0)
+                                    .color(Color32::GRAY),
+                            );
+                        }
+                        for d in &devices {
+                            let chosen = selected.as_ref() == Some(&d.id);
+                            let l = format!("{} ({:04x}:{:04x})", d.product, d.id.vid, d.id.pid);
+                            if ui.selectable_label(chosen, l).clicked() {
+                                selected = Some(d.id());
+                                label = d.product.clone();
+                                pending_source = Some(InputSourceKind::Hid(d.id()));
+                            }
+                        }
+                    });
+                if ui.button("Refresh").clicked() {
+                    do_refresh = true;
+                }
+            }
+        });
+
+        // Detect a source-kind change.
+        if kind != self.source_kind {
+            self.source_kind = kind;
+            match kind {
+                SourceKind::XInput => pending_source = Some(InputSourceKind::XInput),
+                SourceKind::Hid => do_refresh = true, // refresh + auto-pick below
+            }
+        }
+        self.selected_hid = selected;
+        self.selected_hid_label = label;
+
+        if do_refresh {
+            self.hid_devices = list_hid_gamepads();
+            if self.source_kind == SourceKind::Hid && self.selected_hid.is_none() {
+                if let Some(d) = self.hid_devices.iter().find(|d| d.id.vid != 0x1209) {
+                    self.selected_hid = Some(d.id());
+                    self.selected_hid_label = d.product.clone();
+                    pending_source = Some(InputSourceKind::Hid(d.id()));
+                }
+            }
+        }
+        if let Some(src) = pending_source {
+            self.rebuild_input(src);
+            self.restart_sync_if_present();
+            self.persist_ui();
+        }
+    }
+
+    /// The input source the sync service should read — mirrors the app-wide
+    /// picker (a HID stick if one is selected, else XInput).
+    fn sync_source(&self) -> crate::sync_service::SyncSource {
+        match (self.source_kind, &self.selected_hid) {
+            (SourceKind::Hid, Some(id)) => crate::sync_service::SyncSource::Hid(id.clone()),
+            _ => crate::sync_service::SyncSource::XInput,
+        }
+    }
+
+    /// Restart the sync service on the current source — but only while the NOBD
+    /// device is present (i.e. sync is meant to be running). Called when the
+    /// input source changes so the synced output follows the selected stick.
+    fn restart_sync_if_present(&mut self) {
+        if self.controller_present {
+            self.sync_service =
+                crate::sync_service::SyncService::start(self.pad_type, self.sync_source());
+        }
     }
 
     /// Persist the current input-source choice (separate from shared-mem Cfg).
@@ -255,8 +372,10 @@ impl eframe::App for FingerGapApp {
                     Ok(()) => {
                         self.controller_present = true;
                         self.setup_msg = None;
-                        self.sync_service =
-                            crate::sync_service::SyncService::start(self.pad_type);
+                        self.sync_service = crate::sync_service::SyncService::start(
+                            self.pad_type,
+                            self.sync_source(),
+                        );
                     }
                     Err(e) => self.setup_msg = Some(format!("Enable failed: {e}")),
                 }
@@ -388,93 +507,7 @@ impl eframe::App for FingerGapApp {
             // N chords, so it re-decides live and flips when you toggle NOBD
             // mid-session (no Reset needed). Only relevant on the Gap Tester tab.
             if self.active_tab == Tab::GapTester {
-                // Input source selector (XInput vs raw HID + device picker). Work
-                // on LOCAL copies inside the egui closures, then write back +
-                // apply after — avoids nested mutable borrows of `self`.
-                let mut kind = self.source_kind;
-                let mut selected = self.selected_hid.clone();
-                let mut label = self.selected_hid_label.clone();
-                // Only your real sticks — hide the NOBD virtual pad (our pid.codes
-                // VID) so you're never testing the synced output as if it were a
-                // stock controller.
-                let devices: Vec<_> = self
-                    .hid_devices
-                    .clone()
-                    .into_iter()
-                    .filter(|d| d.id.vid != 0x1209)
-                    .collect();
-                let mut do_refresh = false;
-                let mut pending_source: Option<InputSourceKind> = None;
-
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("Test controller").size(12.0).color(Color32::GRAY));
-                    egui::ComboBox::from_id_salt("input_source")
-                        .selected_text(match kind {
-                            SourceKind::XInput => "Xbox / XInput sticks",
-                            SourceKind::Hid => "DirectInput fightstick",
-                        })
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut kind, SourceKind::XInput, "Xbox / XInput sticks (auto)");
-                            ui.selectable_value(&mut kind, SourceKind::Hid, "DirectInput fightstick");
-                        });
-
-                    if kind == SourceKind::Hid {
-                        let sel_text = if label.is_empty() {
-                            "Select device…".to_owned()
-                        } else {
-                            label.clone()
-                        };
-                        egui::ComboBox::from_id_salt("hid_device")
-                            .selected_text(sel_text)
-                            .show_ui(ui, |ui| {
-                                if devices.is_empty() {
-                                    ui.label(
-                                        RichText::new("No HID gamepads — Xbox pads aren't usable here; use a DInput stick")
-                                            .size(11.0)
-                                            .color(Color32::GRAY),
-                                    );
-                                }
-                                for d in &devices {
-                                    let chosen = selected.as_ref() == Some(&d.id);
-                                    let l = format!("{} ({:04x}:{:04x})", d.product, d.id.vid, d.id.pid);
-                                    if ui.selectable_label(chosen, l).clicked() {
-                                        selected = Some(d.id());
-                                        label = d.product.clone();
-                                        pending_source = Some(InputSourceKind::Hid(d.id()));
-                                    }
-                                }
-                            });
-                        if ui.button("Refresh").clicked() {
-                            do_refresh = true;
-                        }
-                    }
-                });
-
-                // Detect a source-kind change.
-                if kind != self.source_kind {
-                    self.source_kind = kind;
-                    match kind {
-                        SourceKind::XInput => pending_source = Some(InputSourceKind::XInput),
-                        SourceKind::Hid => do_refresh = true, // refresh + auto-pick below
-                    }
-                }
-                self.selected_hid = selected;
-                self.selected_hid_label = label;
-
-                if do_refresh {
-                    self.hid_devices = list_hid_gamepads();
-                    if self.source_kind == SourceKind::Hid && self.selected_hid.is_none() {
-                        if let Some(d) = self.hid_devices.iter().find(|d| d.id.vid != 0x1209) {
-                            self.selected_hid = Some(d.id());
-                            self.selected_hid_label = d.product.clone();
-                            pending_source = Some(InputSourceKind::Hid(d.id()));
-                        }
-                    }
-                }
-                if let Some(src) = pending_source {
-                    self.rebuild_input(src);
-                    self.persist_ui();
-                }
+                self.input_source_picker(ui);
 
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("Decision window").size(12.0).color(Color32::GRAY));
@@ -561,6 +594,13 @@ impl eframe::App for FingerGapApp {
                         }
                     }
                 });
+
+                // Which real controller feeds the sync. For an XInput-only game
+                // (MvC2) you MUST pick a DirectInput stick here — an Xbox pad
+                // would collide with the companion in XInput space.
+                if self.controller_present {
+                    self.input_source_picker(ui);
+                }
 
                 // Game-compatibility mode — tucked away; most users never open it.
                 let mut pt = self.pad_type;
