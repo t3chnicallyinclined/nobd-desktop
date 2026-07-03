@@ -107,6 +107,12 @@ pub struct FingerGapApp {
     /// In-flight background Enable — `Some` while setup runs off the UI thread
     /// (shows a spinner); resolves to Ok/Err on completion.
     setup_rx: Option<std::sync::mpsc::Receiver<Result<(), String>>>,
+    /// Hide the physical stick from games via HidHide (HID source only), so only
+    /// the NOBD Controller shows up in Steam.
+    hide_stick: bool,
+    /// One-shot: reconcile HidHide cloak with intent on the first frame (restores
+    /// hiding after a relaunch, or clears a stale cloak after a crash).
+    startup_hide_done: bool,
 }
 
 impl FingerGapApp {
@@ -165,6 +171,8 @@ impl FingerGapApp {
             controller_present: crate::nobd_setup::device_present(),
             setup_msg: None,
             setup_rx: None,
+            hide_stick: ui_cfg.hide_stick != 0,
+            startup_hide_done: false,
         }
     }
 
@@ -306,6 +314,7 @@ impl FingerGapApp {
             self.sync_service =
                 crate::sync_service::SyncService::start(self.pad_type, self.sync_source());
         }
+        self.apply_stick_hiding();
     }
 
     /// Persist the current input-source choice (separate from shared-mem Cfg).
@@ -321,7 +330,40 @@ impl FingerGapApp {
                 .map(|id| id.to_persist())
                 .unwrap_or_default(),
             pad_type: self.pad_type.as_u32(),
+            hide_stick: self.hide_stick as u32,
         });
+    }
+
+    /// Apply (or clear) HidHide cloaking to match the current intent: hide the
+    /// selected stick from games when hiding is on AND we're syncing from a HID
+    /// source; otherwise make sure nothing stays cloaked. Best-effort (no-ops if
+    /// HidHide isn't installed). Shell-outs, so call on events, never per-frame.
+    fn apply_stick_hiding(&self) {
+        if !crate::hidhide::is_installed() {
+            return;
+        }
+        let hide_target = if self.hide_stick && self.controller_present {
+            match (self.source_kind, &self.selected_hid) {
+                (SourceKind::Hid, Some(id)) => Some(id.path.clone()),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        match hide_target {
+            Some(path) => {
+                let _ = crate::hidhide::whitelist_self();
+                let _ = crate::hidhide::hide_device(&path);
+                let _ = crate::hidhide::cloak(true);
+            }
+            None => {
+                // Un-cloak so no stick is left hidden when hiding is off / not HID.
+                let _ = crate::hidhide::cloak(false);
+                if let Some(id) = &self.selected_hid {
+                    let _ = crate::hidhide::unhide_device(&id.path);
+                }
+            }
+        }
     }
 }
 
@@ -365,6 +407,15 @@ impl eframe::App for FingerGapApp {
         // marks are picked up promptly.
         ctx.request_repaint_after(std::time::Duration::from_millis(50));
 
+        // Quit from the tray — un-cloak any hidden stick, then exit. (exit skips
+        // destructors, so this is where the HidHide cleanup must happen.)
+        if crate::tray::WANT_QUIT.load(std::sync::atomic::Ordering::Relaxed) {
+            if let Some(id) = &self.selected_hid {
+                crate::hidhide::release(&id.path);
+            }
+            std::process::exit(0);
+        }
+
         // A background Enable finished — apply its result on the UI thread.
         if let Some(rx) = &self.setup_rx {
             if let Ok(result) = rx.try_recv() {
@@ -376,11 +427,19 @@ impl eframe::App for FingerGapApp {
                             self.pad_type,
                             self.sync_source(),
                         );
+                        self.apply_stick_hiding();
                     }
                     Err(e) => self.setup_msg = Some(format!("Enable failed: {e}")),
                 }
                 self.setup_rx = None;
             }
+        }
+
+        // Reconcile HidHide cloak with intent once, on the first frame — restores
+        // hiding after a login-task relaunch, or clears a stale cloak from a crash.
+        if !self.startup_hide_done {
+            self.apply_stick_hiding();
+            self.startup_hide_done = true;
         }
 
         // Keep the tray menu's check marks in sync with the live config.
@@ -540,6 +599,7 @@ impl eframe::App for FingerGapApp {
                             {
                                 self.controller_present = false;
                                 self.sync_service = crate::sync_service::SyncService::stopped();
+                                self.apply_stick_hiding(); // un-cloak: stick is normal again
                                 self.persist_ui();
                             }
                             ui.label(
@@ -600,6 +660,36 @@ impl eframe::App for FingerGapApp {
                 // would collide with the companion in XInput space.
                 if self.controller_present {
                     self.input_source_picker(ui);
+
+                    // Device hiding — with a HID stick, hide it from games so
+                    // only the NOBD Controller shows up (via HidHide).
+                    if self.source_kind == SourceKind::Hid {
+                        if crate::hidhide::is_installed() {
+                            let mut hide = self.hide_stick;
+                            if ui
+                                .checkbox(
+                                    &mut hide,
+                                    "Hide my stick from games (show only NOBD Controller)",
+                                )
+                                .changed()
+                            {
+                                self.hide_stick = hide;
+                                self.apply_stick_hiding();
+                                self.persist_ui();
+                            }
+                        } else {
+                            ui.horizontal(|ui| {
+                                if ui.button("Enable device hiding\u{2026}").clicked() {
+                                    let _ = crate::hidhide::run_installer();
+                                }
+                                ui.label(
+                                    RichText::new("Installs HidHide (signed) so only the NOBD Controller shows in games — one-time, needs a reboot.")
+                                        .size(11.0)
+                                        .color(Color32::GRAY),
+                                );
+                            });
+                        }
+                    }
                 }
 
                 // Game-compatibility mode — tucked away; most users never open it.
@@ -622,6 +712,7 @@ impl eframe::App for FingerGapApp {
                     // stop the (now wrong-mode) sync until the user does.
                     self.controller_present = false;
                     self.sync_service = crate::sync_service::SyncService::stopped();
+                    self.apply_stick_hiding(); // un-cloak until re-enabled
                     self.persist_ui();
                 }
             }

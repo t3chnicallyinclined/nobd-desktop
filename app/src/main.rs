@@ -3,6 +3,7 @@
 
 mod app;
 mod hid;
+mod hidhide;
 mod input;
 mod logo;
 mod monitor;

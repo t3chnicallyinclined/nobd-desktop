@@ -4,3 +4,8 @@
 # debug capture (RedirectStandardError / panic hook)
 panic.txt
 out.txt
+
+# Vendored third-party installer (fetched, not committed — 8 MB signed binary):
+#   gh release download v1.5.230.0 --repo nefarius/HidHide \
+#     --pattern "HidHide_1.5.230_x64.exe" --dir tools/hidhide
+tools/hidhide/*.exe

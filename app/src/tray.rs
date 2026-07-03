@@ -11,6 +11,9 @@ use nobd_shared::state;
 /// Set by the tray event thread to ask the main thread (update loop) to re-sync
 /// eframe's visible state once the OS window is back up.
 pub static WANT_SHOW: AtomicBool = AtomicBool::new(false);
+/// Quit requested from the tray — the UI loop handles cleanup (un-cloak the
+/// hidden stick) then exits, so we never leave a device hidden.
+pub static WANT_QUIT: AtomicBool = AtomicBool::new(false);
 
 /// Un-hide / restore / foreground the window directly via Win32. eframe stops
 /// running its update loop while the window is hidden, so we can't rely on a
@@ -160,7 +163,9 @@ pub fn spawn(ctx: egui::Context) -> Option<Tray> {
                 } else if ev.id == id_w8 {
                     for w in &s.window_ms { w.store(8, Ordering::Relaxed); }
                 } else if ev.id == id_quit {
-                    std::process::exit(0);
+                    // Let the UI loop clean up (un-cloak) before exiting.
+                    WANT_QUIT.store(true, Ordering::Relaxed);
+                    ctx.request_repaint();
                 }
                 // Wake the UI so check marks re-sync to the new state.
                 ctx.request_repaint();
