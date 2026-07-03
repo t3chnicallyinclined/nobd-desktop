@@ -575,17 +575,7 @@ fn draw_nobd_sync(ctx: &egui::Context, sync: &crate::sync_service::SyncService, 
         });
         ui.separator();
 
-        // ── Setup: how to wire it into a game (all native NOBD, no ViGEm) ──
-        ui.label(RichText::new("Setup").strong().size(15.0));
-        ui.label("1.  Pick a NOBD Controller mode above and click Enable (one-time, needs admin).");
-        ui.label("2.  Connect your controller (XInput). The NOBD Controller comes up automatically — the banner above turns green.");
-        ui.label("3.  Turn on \"NOBD sync window\" below and set your window (from the Finger Gap Tester tab).");
-        ui.label(format!(
-            "4.  In your game/emulator's controller settings, select \"{steam_name}\" \u{2014} your real stick drives it underneath, grouped."
-        ));
-        ui.separator();
-
-        // ── Master control ──
+        // ── Controls (what you actually touch) ──
         let mut enabled = s.enabled.load(Ordering::Relaxed) != 0;
         if ui.checkbox(&mut enabled, RichText::new("NOBD sync window").size(16.0)).changed() {
             s.enabled.store(enabled as u32, Ordering::Relaxed);
@@ -599,78 +589,43 @@ fn draw_nobd_sync(ctx: &egui::Context, sync: &crate::sync_service::SyncService, 
                 s.window_ms[0].store(w, Ordering::Relaxed);
             }
         });
-        ui.weak(
-            "Capped at 16 ms = one 60fps frame (the game's original \"same-frame\" window — the \
-             honest maximum). Set it from your finger gap on the Finger Gap Tester tab.",
-        );
+        ui.weak("Set this from your finger gap on the Finger Gap Tester tab. 16 ms = one 60fps frame (the honest max).");
 
+        // ── Everything explanatory folds in here — open it once, then forget it. ──
         ui.add_space(10.0);
-        egui::Frame::new()
-            .inner_margin(10.0)
-            .corner_radius(8.0)
-            .stroke(egui::Stroke::new(2.0, TEAL))
-            .show(ui, |ui| {
-                ui.label(RichText::new("Tips").strong().color(TEAL));
-                ui.label(
-                    "\u{2022}  The NOBD pad uses its OWN identity, so it's NOT labeled \"Xbox 360 Controller\" \
-                     (that's your real stick). In Steam it shows as \"XInput Controller #N\"; on the DualShock 4 \
-                     setting it shows as \"Wireless Controller\". Pick the NOBD one.",
-                );
-                ui.add_space(2.0);
-                ui.label(
-                    "\u{2022}  Xbox 360 mode stays XInput-native (works everywhere). DualShock 4 works in Steam / \
-                     emulators / DInput games, but not raw-XInput-only games launched outside Steam.",
-                );
-                ui.add_space(2.0);
-                ui.label(
-                    "\u{2022}  If a game grabs every controller at once and you get doubled inputs, it needs \
-                     the real pad hidden (HidHide) \u{2014} an optional advanced step, and a non-issue on \
-                     native-HID NOBD hardware.",
-                );
-            });
-
-        ui.add_space(10.0);
-        egui::CollapsingHeader::new(RichText::new("\u{24D8}  What is the frame-boundary issue?").color(TEAL))
+        egui::CollapsingHeader::new(RichText::new("\u{24D8}  How it works & setup").color(TEAL))
             .default_open(false)
             .show(ui, |ui| {
+                ui.label(RichText::new("Setup").strong());
+                ui.label("1.  Click Enable (one-time, needs admin) — the picker is above.");
+                ui.label("2.  Connect your controller. The NOBD Controller comes up automatically (banner turns green).");
+                ui.label("3.  Turn on the sync window above; set it from the Finger Gap Tester.");
+                ui.label(format!(
+                    "4.  In your game's controller settings, select \"{steam_name}\" \u{2014} your stick drives it, grouped."
+                ));
+
+                ui.add_space(8.0);
+                ui.label(RichText::new("How it works").strong());
                 ui.label(
-                    "Old arcade & console games like MvC2 were built to read your controller \
-                     exactly ONCE per frame \u{2014} 60 times a second, every 16.67ms \u{2014} locked \
-                     to the hardware's fixed refresh. On the original hardware the controller and \
-                     the game's read were tightly coupled, so pressing two buttons together always \
-                     landed them on the same frame.",
+                    "A ~1 kHz background thread reads your stick and runs the sync window on its own \
+                     clock, like the controller firmware. The grouped result is delivered as the \
+                     native NOBD Controller \u{2014} universal, not tied to one game. Near-simultaneous \
+                     attacks land on the same frame; a lone press costs a frame only if it lands in \
+                     the last few ms before a read. Directions are never delayed.",
                 );
-                ui.add_space(4.0);
+
+                ui.add_space(8.0);
+                ui.label(RichText::new("The frame-boundary issue").strong());
                 ui.label(
-                    "On modern hardware (and emulation) your controller updates far faster \
-                     (1000Hz+) than the game still reads (60Hz). Press two buttons a few ms apart \
-                     \u{2014} your natural \u{201C}finger gap\u{201D} \u{2014} and the game's single \
-                     60Hz read can land BETWEEN them and see only the first button. A dash becomes a \
-                     stray jab, an assist drops, a tech is missed \u{2014} not because you mis-input, \
-                     but because the read sampled at the wrong instant.",
-                );
-                ui.add_space(4.0);
-                ui.label(
-                    RichText::new(
-                        "NOBD groups your near-simultaneous presses so they reach the game together, \
-                         on the frame it actually reads \u{2014} with sub-frame latency. It changes \
-                         WHEN a real press reports, never WHICH buttons. Nothing invented, nothing \
-                         automated.",
-                    )
-                    .color(GREEN),
+                    "Old games like MvC2 read your controller exactly ONCE per frame \u{2014} 60 times \
+                     a second, every 16.67 ms. On modern hardware your stick updates far faster \
+                     (1000 Hz+) than the game reads (60 Hz), so two buttons a few ms apart \u{2014} your \
+                     natural finger gap \u{2014} can land on either side of a single read: a dash \
+                     becomes a stray jab. NOBD groups near-simultaneous presses so they reach the game \
+                     together, on the frame it actually reads. It changes WHEN a press reports, never \
+                     WHICH buttons.",
                 );
             });
-
-        ui.add_space(10.0);
-        ui.separator();
-        ui.label(RichText::new("How it works").strong());
-        ui.label(
-            "A ~1kHz background thread reads your stick continuously and runs the sync window on its \
-             own clock, just like the controller's firmware. The grouped result is presented as a \
-             virtual Xbox pad that any game can read \u{2014} so the sync is universal, not tied to a \
-             single game. Near-simultaneous attacks land on the same frame; a lone press only costs a \
-             frame if it lands in the last few ms before a read. Directions are never delayed.",
-        );
     });
 }
 
