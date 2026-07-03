@@ -49,6 +49,7 @@ pub struct UiCfg {
 /// Load the UI-only settings (input source + HID device).
 pub fn load_ui() -> UiCfg {
     let mut ui = UiCfg::default();
+    ui.hide_stick = 1; // default ON — hide the physical stick unless told otherwise
     if let Some(path) = ui_config_path() {
         if let Ok(text) = std::fs::read_to_string(&path) {
             for line in text.lines() {

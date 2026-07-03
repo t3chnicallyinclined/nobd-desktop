@@ -120,10 +120,3 @@ pub fn unhide_device(interface_path: &str) -> io::Result<()> {
 pub fn cloak(on: bool) -> io::Result<()> {
     cli(&[if on { "--cloak-on" } else { "--cloak-off" }])
 }
-
-/// Full teardown: cloak off + unhide the given device. Best-effort — used when
-/// sync stops or the app quits so the stick is never left hidden.
-pub fn release(interface_path: &str) {
-    let _ = cloak(false);
-    let _ = unhide_device(interface_path);
-}

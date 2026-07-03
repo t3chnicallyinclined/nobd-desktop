@@ -38,19 +38,19 @@ pub enum PadType {
 
 impl PadType {
     pub fn from_u32(n: u32) -> Self {
-        // Branded HID is the default. Only the explicit XInput marker (100)
-        // selects XInput — old ViGEm pad_type values (0/1/2) all fall through
-        // to Hid, so a migrating user isn't stuck on the wrong mode.
-        if n == 100 {
-            PadType::Xinput
-        } else {
+        // XInput is the default output — it works in the most games (incl.
+        // XInput-only ones like MvC2). Only the explicit HID marker (1) selects
+        // the branded HID pad; every other/legacy value falls through to XInput.
+        if n == 1 {
             PadType::Hid
+        } else {
+            PadType::Xinput
         }
     }
     pub fn as_u32(self) -> u32 {
         match self {
-            PadType::Hid => 0,
-            PadType::Xinput => 100,
+            PadType::Hid => 1,
+            PadType::Xinput => 0,
         }
     }
     pub fn mode(self) -> hm_native::PadMode {
@@ -267,25 +267,6 @@ fn run_xinput(stop: Arc<AtomicBool>, status: Arc<SyncStatus>, pad: PadType) {
         }
     };
 
-    // Wait for the real pad before opening the virtual one (avoid feedback).
-    let real_slot = loop {
-        if stop.load(Ordering::Relaxed) {
-            return;
-        }
-        if let Some(s) = (0..4).find(|&s| xinput_state(xi, s).is_some()) {
-            status.real_slot.store(s, Ordering::Relaxed);
-            status.real_present.store(true, Ordering::Relaxed);
-            break s;
-        }
-        status.real_slot.store(NO_SLOT, Ordering::Relaxed);
-        status.real_present.store(false, Ordering::Relaxed);
-        std::thread::sleep(Duration::from_millis(500));
-    };
-
-    // Snapshot connected XInput slots (to identify the virtual pad's slot in
-    // XInput mode).
-    let before: Vec<u32> = (0..4).filter(|&s| xinput_state(xi, s).is_some()).collect();
-
     let mut ctrl = match hm_native::NobdController::open(pad.mode()) {
         Ok(c) => c,
         Err(_) => {
@@ -294,12 +275,54 @@ fn run_xinput(stop: Arc<AtomicBool>, status: Arc<SyncStatus>, pad: PadType) {
         }
     };
 
+    // Identify OUR companion's XInput slot by FINGERPRINTING it. XInput exposes
+    // no device identity, so we drive a unique button marker onto the companion
+    // and find the slot reporting exactly that — definitively our own output.
+    // Without this we can't tell the companion from the real pad, which causes
+    // feedback (sync reading its own output) and a phantom pad in the tester.
+    let mut companion_slot: Option<u32> = None;
     if pad == PadType::Xinput {
-        std::thread::sleep(Duration::from_millis(300)); // let XInput enumerate it
-        if let Some(vs) = (0..4).find(|&s| !before.contains(&s) && xinput_state(xi, s).is_some()) {
-            status.virtual_slot.store(vs, Ordering::Relaxed);
+        const MARKER: u16 = 0x0330; // LB|RB|Back|Start — an unlikely-to-be-held combo
+        // Hold the marker and watch for the slot that reflects it. The companion's
+        // UMDF driver can take up to ~500ms to (re)attach to the freshly-created
+        // shared section, so give it up to ~2s. Require TWO consecutive matches on
+        // the same slot so a real pad transiently holding those buttons can't be
+        // mistaken for our output.
+        let mut prev: Option<u32> = None;
+        for _ in 0..200 {
+            if stop.load(Ordering::Relaxed) {
+                return;
+            }
+            ctrl.submit(MARKER, 0, 0, 0, 0, 0, 0);
+            std::thread::sleep(Duration::from_millis(10));
+            let hit = (0..4)
+                .find(|&s| xinput_state(xi, s).map_or(false, |st| st.Gamepad.wButtons == MARKER));
+            if hit.is_some() && hit == prev {
+                companion_slot = hit;
+                status.virtual_slot.store(hit.unwrap(), Ordering::Relaxed);
+                break;
+            }
+            prev = hit;
         }
+        ctrl.submit(0, 0, 0, 0, 0, 0, 0); // release the marker
     }
+
+    // Wait for the real pad = the first present slot that is NOT our companion.
+    let real_slot = loop {
+        if stop.load(Ordering::Relaxed) {
+            return;
+        }
+        if let Some(s) =
+            (0..4).find(|&s| Some(s) != companion_slot && xinput_state(xi, s).is_some())
+        {
+            status.real_slot.store(s, Ordering::Relaxed);
+            status.real_present.store(true, Ordering::Relaxed);
+            break s;
+        }
+        status.real_slot.store(NO_SLOT, Ordering::Relaxed);
+        status.real_present.store(false, Ordering::Relaxed);
+        std::thread::sleep(Duration::from_millis(500));
+    };
 
     unsafe { timeBeginPeriod(1) };
     status.active.store(true, Ordering::Relaxed);
