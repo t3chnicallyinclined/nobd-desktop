@@ -10,5 +10,5 @@ pushd "%~dp0"
 cargo build -p nobd-app
 if errorlevel 1 ( popd & exit /b 1 )
 popd
-start "" "%~dp0target\debug\nobd.exe"
+start "" "%~dp0target\debug\nobd.exe" %*
 echo Launched. Left-click the tray icon (teal dot) to open.
