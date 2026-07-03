@@ -156,7 +156,11 @@ impl InputChannel {
             (self.base.add(OFF_DATA_SIZE) as *mut u32).write_volatile(n as u32);
             core::ptr::copy_nonoverlapping(report.as_ptr(), self.base.add(OFF_DATA), n);
             // Mandatory per-frame: keep the legacy (non-extended) path selected.
-            (self.base.add(OFF_EXT_SIZE) as *mut u32).write_volatile(0);
+            // ExtendedReportSize is at a packed (unaligned) offset — write it
+            // byte-wise so the u32 volatile write never hits an unaligned pointer.
+            for i in 0..4 {
+                self.base.add(OFF_EXT_SIZE + i).write_volatile(0u8);
+            }
 
             fence(Ordering::SeqCst);
             let done = pending.wrapping_add(1); // even — publish
@@ -180,7 +184,11 @@ impl InputChannel {
             fence(Ordering::SeqCst);
 
             core::ptr::copy_nonoverlapping(gip.as_ptr(), self.base.add(OFF_GIP), gip.len());
-            (self.base.add(OFF_EXT_SIZE) as *mut u32).write_volatile(0);
+            // ExtendedReportSize is at a packed (unaligned) offset — write it
+            // byte-wise so the u32 volatile write never hits an unaligned pointer.
+            for i in 0..4 {
+                self.base.add(OFF_EXT_SIZE + i).write_volatile(0u8);
+            }
 
             fence(Ordering::SeqCst);
             let done = pending.wrapping_add(1);
