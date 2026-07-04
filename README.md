@@ -10,6 +10,12 @@ Frame-sync for the PC version of *Marvel vs. Capcom 2* (Fighting Collection, Ste
 
 > 📖 **New here?** See the [**Usage Guide**](docs/USAGE.md) — a page-by-page walkthrough (Install, NOBD Sync, and the Finger Gap Tester, including how to read it and pick your window).
 
+> ## ⚡ You're using the free fix. There's a board coming.
+>
+> NOBD Desktop is the sync window in software. It is also going into **the most over-engineered fightstick PCB ever designed**: dual MCU, up to 16 kHz USB, native Dreamcast, a 40x-faster LAN target, fully open. Pre-prototype, built in public. No price, no preorder.
+>
+> Show support, or are you just insane enough to want the fastest, most over-engineered fightstick ever made? **[Join the founding-tester waitlist at zero.nobd.net →](https://zero.nobd.net/?utm_source=nobd-desktop-repo&utm_medium=repo)**
+
 ---
 
 ## The problem it fixes
