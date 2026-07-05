@@ -639,11 +639,19 @@ impl eframe::App for FingerGapApp {
                             self.begin_turn_on();
                         }
                     } else if ui
-                        .button(RichText::new("Turn NOBD On").size(15.0).strong())
+                        .button(RichText::new("Turn NOBD On (admin)").size(15.0).strong())
+                        .on_hover_text("NOBD needs admin to create the virtual controller — Windows will ask you to confirm.")
                         .clicked()
-                        && crate::nobd_setup::relaunch_elevated_for_setup(self.pad_type).is_ok()
                     {
-                        std::process::exit(0);
+                        // Fire the UAC prompt (relaunch elevated); on success this
+                        // instance exits and the elevated one takes over. Surface a
+                        // failure/decline instead of doing nothing.
+                        match crate::nobd_setup::relaunch_elevated_for_setup(self.pad_type) {
+                            Ok(()) => std::process::exit(0),
+                            Err(e) => {
+                                self.setup_msg = Some(format!("Admin request cancelled or failed: {e}"));
+                            }
+                        }
                     }
                 });
 

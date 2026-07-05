@@ -97,8 +97,10 @@ pub fn eject() -> io::Result<u32> {
     Ok(hm_native::remove_all())
 }
 
-/// Relaunch nobd.exe elevated with `--setup-<mode>` (UAC prompt). The
-/// non-elevated caller should exit afterward so the elevated instance takes over.
+/// Relaunch nobd.exe elevated with `--setup-<mode>` — this is what fires the UAC
+/// prompt. The non-elevated caller should exit afterward so the elevated instance
+/// takes over. `ShellExecuteW` returns an HINSTANCE > 32 on success; <= 32 means
+/// the prompt failed or the user declined.
 pub fn relaunch_elevated_for_setup(mode: PadType) -> io::Result<()> {
     let exe = std::env::current_exe()?;
     let arg = match mode {
@@ -116,7 +118,10 @@ pub fn relaunch_elevated_for_setup(mode: PadType) -> io::Result<()> {
         ShellExecuteW(0, verb.as_ptr(), file.as_ptr(), args.as_ptr(), std::ptr::null(), 1)
     };
     if (r as isize) <= 32 {
-        return Err(io::Error::last_os_error());
+        return Err(io::Error::other(format!(
+            "ShellExecute(runas) returned {}",
+            r as isize
+        )));
     }
     Ok(())
 }
