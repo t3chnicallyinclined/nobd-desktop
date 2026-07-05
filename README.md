@@ -12,9 +12,9 @@ Frame-sync for the PC version of *Marvel vs. Capcom 2* (Fighting Collection, Ste
 
 > ## ⚡ You're using the free fix. There's a board coming.
 >
-> NOBD Desktop is the sync window in software. It is also going into **the most over-engineered fightstick PCB ever designed**: dual MCU, up to 16 kHz USB, native Dreamcast, a 40x-faster LAN target, fully open. Pre-prototype, built in public. No price, no preorder.
+> NOBD Desktop is the sync window in software. It is also built into **the most over-engineered fightstick PCB ever designed**: dual MCU, up to 16 kHz USB, native Dreamcast, a 40x-faster LAN target, fully open. Pre-prototype, built in public.
 >
-> Show support, or are you just insane enough to want the fastest, most over-engineered fightstick ever made? **[Join the founding-tester waitlist at zero.nobd.net →](https://zero.nobd.net/?utm_source=nobd-desktop-repo&utm_medium=repo)**
+> **Founding reservations are open: the first 500 lock $150 (retail lands at $199).** No payment now, nothing binding. Show support, or are you just insane enough to want the fastest, most over-engineered fightstick ever made? **[Reserve yours at zero.nobd.net/build →](https://zero.nobd.net/build?utm_source=nobd-desktop-repo&utm_medium=repo)**
 
 ---
 
