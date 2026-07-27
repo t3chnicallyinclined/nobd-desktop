@@ -8,7 +8,7 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use windows_sys::core::GUID;
 use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
@@ -125,12 +125,33 @@ pub fn find_device_path(vid: u16, pid: u16) -> Option<Vec<u16>> {
     }
 }
 
-/// Open the NOBD Bulk WinUSB device, read the 20-byte stream, and publish each frame into `snap`.
-/// Returns when the device can't be opened or `snap.stop` is set.
+/// Keep the NOBD Bulk stream attached for the life of the sync service. Retries the open forever
+/// (short backoff) until `snap.stop` is set -- so a device that's momentarily busy (another process
+/// still tearing down its handle) or unplugged/replugged re-attaches on its own, instead of the reader
+/// giving up after one failed open. This is the fix for the "force-killed app -> bulk never came back"
+/// bug: `stream_once` returns on any open failure or device loss, and we just try again.
 pub fn run_reader(snap: Arc<BulkSnapshot>) {
+    while !snap.stop.load(Ordering::Relaxed) {
+        stream_once(&snap);
+        snap.present.store(false, Ordering::Relaxed);
+        snap.rate_hz.store(0, Ordering::Relaxed);
+        // Back off ~250 ms before retrying the open, but wake promptly on stop.
+        for _ in 0..10 {
+            if snap.stop.load(Ordering::Relaxed) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
+}
+
+/// One attach: find + open the device, then stream the 20-byte payloads into `snap` until the device
+/// is lost or `snap.stop` is set. Returns (rather than looping on the open) so `run_reader` can back
+/// off and retry -- every early `return` here is "couldn't attach this time, try again later".
+fn stream_once(snap: &Arc<BulkSnapshot>) {
     let path = match find_device_path(NOBD_BULK_VID, NOBD_BULK_PID) {
         Some(p) => p,
-        None => return, // device not present / not WinUSB-bound
+        None => return, // device not present / not WinUSB-bound yet
     };
     unsafe {
         let h: HANDLE = CreateFileW(

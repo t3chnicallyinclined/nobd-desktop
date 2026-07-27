@@ -751,7 +751,7 @@ impl FingerGapApp {
                 let fresh_us = 1_000_000 / bulk_rate;
                 ui.horizontal_wrapped(|ui| {
                     ui.label(RichText::new("\u{26A1} EXTREME LOW LATENCY").size(12.0).strong().color(GREEN));
-                    ui.label(RichText::new(format!("\u{2014} {khz:.1} kHz stream (~{fresh_us} \u{00B5}s fresh); whole path < 200 \u{00B5}s vs ~500 \u{00B5}s XInput")).size(11.0).color(Color32::GRAY));
+                    ui.label(RichText::new(format!("\u{2014} {khz:.1} kHz stream \u{00B7} transport freshness ~{fresh_us} \u{00B5}s + ~54 \u{00B5}s companion, vs ~0.5\u{2013}1 ms USB poll (not press-to-pixel)")).size(11.0).color(Color32::GRAY));
                 });
             }
 
@@ -894,8 +894,9 @@ fn draw_gap_tester(&mut self, ctx: &egui::Context) {
             ui.add_space(2.0);
         }
         // Extreme Low Latency: when the stick is in NOBD Bulk mode, show the live stream rate -- the
-        // stick->app freshness. At ~10 kHz the input is at most ~100 us old when the app reads it, vs the
-        // ~500 us XInput poll it replaces; paired with the ~54 us companion hop, the whole path is < 200 us.
+        // stick->app TRANSPORT freshness. At ~10 kHz the input the app reads is at most ~100 us stale, vs
+        // the ~0.5-1 ms a USB poll leaves it. Freshness only, NOT press-to-pixel -- the game's 60 Hz
+        // sampling + render + display dominate the actual on-screen latency by tens of ms.
         let bulk_rate = self.sync_service.bulk_rate();
         if bulk_rate > 0 {
             let khz = bulk_rate as f32 / 1000.0;
@@ -906,7 +907,7 @@ fn draw_gap_tester(&mut self, ctx: &egui::Context) {
                 ui.label(RichText::new(format!("stick \u{2192} app {khz:.1} kHz")).size(13.0).strong().color(col));
                 ui.label(RichText::new(format!("(~{fresh_us} \u{00B5}s fresh)")).size(11.0).color(Color32::DARK_GRAY));
                 ui.label(RichText::new("\u{2192} companion ~54 \u{00B5}s \u{2192} game").size(11.0).color(Color32::GRAY));
-                ui.label(RichText::new("\u{2014} whole path < 200 \u{00B5}s vs ~500 \u{00B5}s XInput \u{2713}").size(11.0).color(GREEN));
+                ui.label(RichText::new("\u{2014} transport freshness, vs ~0.5\u{2013}1 ms USB (not press-to-pixel)").size(11.0).color(GREEN));
             });
             ui.add_space(2.0);
         }
