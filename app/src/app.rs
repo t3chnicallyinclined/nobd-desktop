@@ -587,7 +587,7 @@ impl eframe::App for FingerGapApp {
                 ui.selectable_value(
                     &mut self.active_tab,
                     Tab::NobdSync,
-                    RichText::new("  NOBD Sync  ").size(15.0),
+                    RichText::new("  NOBD  ").size(15.0),
                 );
                 ui.selectable_value(
                     &mut self.active_tab,
@@ -596,166 +596,10 @@ impl eframe::App for FingerGapApp {
                 );
             });
 
-            // Decision window — the grouping verdict is judged over only the last
-            // N chords, so it re-decides live and flips when you toggle NOBD
-            // mid-session (no Reset needed). Only relevant on the Gap Tester tab.
-            if self.active_tab == Tab::GapTester {
-                self.input_source_picker(ui);
-
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("Decision window").size(12.0).color(Color32::GRAY));
-                    ui.add(
-                        egui::Slider::new(
-                            &mut self.decision_window,
-                            crate::stats::MIN_WINDOW..=crate::stats::MAX_WINDOW,
-                        )
-                        .suffix(" chords"),
-                    )
-                    .on_hover_text("How many recent chords the ON/OFF verdict is based on. Lower = flips faster when you toggle NOBD; higher = steadier.");
-                });
-            }
-
-            // System-wide sync tab: the NOBD Controller is the automatic synced
-            // output — the user just deals with sync + their stock stick. The
-            // device *type* is an Advanced detail, defaulting to the branded
-            // "NOBD Controller" (HID).
-            if self.active_tab == Tab::NobdSync {
-                // ── Master switch — one control does everything: create the NOBD
-                // Controller, auto-bind the active pad, hide it, start syncing. ──
-                ui.horizontal(|ui| {
-                    if self.setup_rx.is_some() {
-                        ui.spinner();
-                        ui.label(
-                            RichText::new("Turning NOBD on\u{2026}").size(14.0).color(Color32::GRAY),
-                        );
-                    } else if self.controller_present {
-                        ui.colored_label(GREEN, RichText::new("\u{25CF}").size(16.0));
-                        if ui
-                            .button(RichText::new("Turn NOBD Off").size(15.0).color(RED))
-                            .clicked()
-                            && crate::nobd_setup::eject().is_ok()
-                        {
-                            self.controller_present = false;
-                            self.sync_service = crate::sync_service::SyncService::stopped();
-                            self.apply_stick_hiding(); // un-cloak: stick is normal again
-                            self.persist_ui();
-                        }
-                    } else if crate::nobd_setup::is_elevated() {
-                        if ui
-                            .button(RichText::new("Turn NOBD On").size(15.0).strong())
-                            .clicked()
-                        {
-                            self.begin_turn_on();
-                        }
-                    } else if ui
-                        .button(RichText::new("Turn NOBD On (admin)").size(15.0).strong())
-                        .on_hover_text("NOBD needs admin to create the virtual controller — Windows will ask you to confirm.")
-                        .clicked()
-                    {
-                        // Fire the UAC prompt (relaunch elevated); on success this
-                        // instance exits and the elevated one takes over. Surface a
-                        // failure/decline instead of doing nothing.
-                        match crate::nobd_setup::relaunch_elevated_for_setup(self.pad_type) {
-                            Ok(()) => std::process::exit(0),
-                            Err(e) => {
-                                self.setup_msg = Some(format!("Admin request cancelled or failed: {e}"));
-                            }
-                        }
-                    }
-                });
-
-                // ── Status line ──
-                if self.controller_present {
-                    ui.label(
-                        RichText::new(format!(
-                            "Syncing your {} \u{2192} NOBD Controller",
-                            self.active_input_name()
-                        ))
-                        .size(12.0)
-                        .color(GREEN),
-                    );
-                    // First-run nudge: with a HID stick and no HidHide, offer to
-                    // hide the physical pad so only the NOBD Controller shows.
-                    if self.source_kind == SourceKind::Hid && !crate::hidhide::is_installed() {
-                        ui.horizontal(|ui| {
-                            if ui.button("Show only NOBD Controller\u{2026}").clicked() {
-                                let _ = crate::hidhide::run_installer();
-                            }
-                            ui.label(
-                                RichText::new("optional \u{2014} hides your stick from games (installs HidHide, needs a reboot)")
-                                    .size(11.0)
-                                    .color(Color32::GRAY),
-                            );
-                        });
-                    }
-                } else if let Some(msg) = &self.setup_msg {
-                    ui.colored_label(RED, RichText::new(msg).size(12.0));
-                } else if self.setup_rx.is_none() {
-                    ui.label(
-                        RichText::new("Off \u{2014} your controller works normally.")
-                            .size(12.0)
-                            .color(Color32::GRAY),
-                    );
-                }
-
-                // ── Advanced drawer — power-user overrides; normal users skip it. ──
-                let mut pt = self.pad_type;
-                let mut pt_changed = false;
-                ui.collapsing(
-                    RichText::new("Advanced").size(12.0).color(Color32::GRAY),
-                    |ui| {
-                        ui.label(RichText::new("Output").size(11.0).color(Color32::GRAY));
-                        ui.radio_value(
-                            &mut pt,
-                            PadType::Xinput,
-                            "XInput / Xbox pad (works in the most games)",
-                        );
-                        ui.radio_value(
-                            &mut pt,
-                            PadType::Hid,
-                            "Branded \u{201C}NOBD Controller\u{201D} (Steam / DirectInput games)",
-                        );
-                        pt_changed = pt != self.pad_type;
-
-                        ui.add_space(6.0);
-                        ui.label(
-                            RichText::new("Input controller (auto by default)")
-                                .size(11.0)
-                                .color(Color32::GRAY),
-                        );
-                        self.input_source_picker(ui);
-
-                        // Device hiding — only meaningful with a HID stick + HidHide.
-                        if self.source_kind == SourceKind::Hid && crate::hidhide::is_installed() {
-                            let mut hide = self.hide_stick;
-                            if ui
-                                .checkbox(
-                                    &mut hide,
-                                    "Hide my stick from games (show only NOBD Controller)",
-                                )
-                                .changed()
-                            {
-                                self.hide_stick = hide;
-                                self.apply_stick_hiding();
-                                self.persist_ui();
-                            }
-                        }
-                    },
-                );
-                if pt_changed {
-                    self.pad_type = pt;
-                    // New output mode needs its own devnode — turn off until the
-                    // user turns it back on for the new mode.
-                    self.controller_present = false;
-                    self.sync_service = crate::sync_service::SyncService::stopped();
-                    self.apply_stick_hiding();
-                    self.persist_ui();
-                }
-            }
         });
 
         match self.active_tab {
-            Tab::NobdSync => draw_nobd_sync(ctx, &self.sync_service, self.pad_type),
+            Tab::NobdSync => self.draw_nobd_tab(ctx),
             Tab::GapTester => self.draw_gap_tester(ctx),
         }
 
@@ -773,86 +617,198 @@ impl eframe::App for FingerGapApp {
 
 // ─── SYSTEM-WIDE SYNC TAB (drives the in-GUI SyncService → virtual NOBD pad) ───
 
-fn draw_nobd_sync(ctx: &egui::Context, sync: &crate::sync_service::SyncService, pad: PadType) {
-    use std::sync::atomic::Ordering;
-    let s = nobd_shared::state();
-    let steam_name = match pad {
-        PadType::Hid => "NOBD Controller",
-        PadType::Xinput => "NOBD Controller (Xbox 360 / XInput)",
-    };
-
-    egui::CentralPanel::default().show(ctx, |ui| {
-        ui.heading("System-wide sync");
-
-        // Runtime hint only — the master switch above owns on/off + status. Here
-        // we surface just the two things worth flagging mid-session.
-        let err = sync.error();
-        if err == crate::sync_service::ERR_NO_XINPUT {
-            ui.colored_label(RED, "\u{25CF} XInput unavailable on this system");
-            ui.separator();
-        } else if sync.is_active() && !sync.real_present() {
-            ui.colored_label(YELLOW, "\u{25CF} Controller connected — press a button to start it reporting…");
-            ui.separator();
+impl FingerGapApp {
+    /// The NOBD master power: create/destroy the virtual controller and start/stop syncing. One
+    /// control owns on/off + status; everything else on the tab just configures what it does.
+    fn draw_master_switch(&mut self, ui: &mut Ui) {
+        if self.setup_rx.is_some() {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(RichText::new("Turning NOBD on\u{2026}").size(15.0).color(Color32::GRAY));
+            });
+            return;
         }
-
-        // ── Controls (what you actually touch) ──
-        let mut enabled = s.enabled.load(Ordering::Relaxed) != 0;
-        if ui.checkbox(&mut enabled, RichText::new("NOBD sync window").size(16.0)).changed() {
-            s.enabled.store(enabled as u32, Ordering::Relaxed);
+        if self.controller_present {
+            ui.horizontal(|ui| {
+                ui.colored_label(GREEN, RichText::new("\u{25CF}").size(16.0));
+                ui.label(RichText::new("NOBD is On").size(16.0).strong().color(GREEN));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button(RichText::new("Turn Off").size(13.0).color(RED)).clicked()
+                        && crate::nobd_setup::eject().is_ok()
+                    {
+                        self.controller_present = false;
+                        self.sync_service = crate::sync_service::SyncService::stopped();
+                        self.apply_stick_hiding(); // un-cloak: the stick is normal again
+                        self.persist_ui();
+                    }
+                });
+            });
+            return;
         }
+        // Off — offer to turn on (via a UAC relaunch first if we're not elevated yet).
+        if crate::nobd_setup::is_elevated() {
+            if ui.button(RichText::new("Turn NOBD On").size(16.0).strong()).clicked() {
+                self.begin_turn_on();
+            }
+        } else if ui
+            .button(RichText::new("Turn NOBD On").size(16.0).strong())
+            .on_hover_text("NOBD needs admin to create the virtual controller — Windows will ask you to confirm.")
+            .clicked()
+        {
+            match crate::nobd_setup::relaunch_elevated_for_setup(self.pad_type) {
+                Ok(()) => std::process::exit(0),
+                Err(e) => self.setup_msg = Some(format!("Admin request cancelled or failed: {e}")),
+            }
+        }
+    }
 
-        ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            ui.label("Sync window:");
-            let mut w = s.window_ms[0].load(Ordering::Relaxed).clamp(1, 16);
-            if ui.add(egui::Slider::new(&mut w, 1..=16).suffix(" ms")).changed() {
-                s.window_ms[0].store(w, Ordering::Relaxed);
+    /// The NOBD tab: one top-to-bottom flow. A live status line, then three labeled sections that
+    /// each mean exactly one thing — INPUT (the stick we read), SYNC WINDOW (the grouping), and, under
+    /// Advanced, OUTPUT (what games see). One controller picker, no name collisions.
+    fn draw_nobd_tab(&mut self, ctx: &egui::Context) {
+        use std::sync::atomic::Ordering;
+        let s = nobd_shared::state();
+        let bulk_rate = self.sync_service.bulk_rate();
+        let steam_name = match self.pad_type {
+            PadType::Hid => "NOBD Controller",
+            PadType::Xinput => "NOBD Controller (Xbox 360 / XInput)",
+        };
+
+        egui::CentralPanel::default().show(ctx, |ui| {
+            // ── Flow strip: your stick → NOBD → your game (the whole model on one line) ──
+            let on = self.controller_present;
+            let stick = if on { self.active_input_name() } else { "your stick".to_owned() };
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new(stick).size(13.0).color(if on { TEAL } else { Color32::GRAY }));
+                ui.label(RichText::new(" \u{2192} ").size(13.0).color(Color32::DARK_GRAY));
+                ui.label(RichText::new("NOBD").size(13.0).strong().color(if on { GREEN } else { Color32::GRAY }));
+                ui.label(RichText::new(" \u{2192} ").size(13.0).color(Color32::DARK_GRAY));
+                ui.label(RichText::new("your game").size(13.0).color(Color32::GRAY));
+            });
+            ui.add_space(6.0);
+
+            // ── Master power + status ──
+            self.draw_master_switch(ui);
+            if self.controller_present {
+                // First-run nudge: with a HID stick and no HidHide, offer to hide the physical pad.
+                if self.source_kind == SourceKind::Hid && !crate::hidhide::is_installed() {
+                    ui.horizontal(|ui| {
+                        if ui.button("Show only NOBD Controller\u{2026}").clicked() {
+                            let _ = crate::hidhide::run_installer();
+                        }
+                        ui.label(RichText::new("optional \u{2014} hides your stick from games (installs HidHide, needs a reboot)").size(11.0).color(Color32::GRAY));
+                    });
+                }
+            } else if let Some(msg) = &self.setup_msg {
+                ui.colored_label(RED, RichText::new(msg).size(12.0));
+            } else if self.setup_rx.is_none() {
+                ui.label(RichText::new("Off \u{2014} your controller works normally.").size(12.0).color(Color32::GRAY));
+            }
+            // Mid-session runtime hints.
+            let err = self.sync_service.error();
+            if err == crate::sync_service::ERR_NO_XINPUT {
+                ui.colored_label(RED, "\u{25CF} XInput unavailable on this system");
+            } else if self.sync_service.is_active() && !self.sync_service.real_present() {
+                ui.colored_label(YELLOW, "\u{25CF} Controller connected \u{2014} press a button to start it reporting\u{2026}");
+            }
+
+            ui.add_space(8.0);
+            ui.separator();
+
+            // ── INPUT: the stick NOBD reads ──
+            ui.label(RichText::new("INPUT").size(12.0).strong().color(TEAL));
+            ui.label(RichText::new("The controller NOBD reads.").size(11.0).color(Color32::GRAY));
+            if bulk_rate > 0 {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new("\u{26A1}").size(14.0).color(GREEN));
+                    ui.label(RichText::new("NOBD Bulk stick \u{2014} Extreme Low Latency (auto-detected)").size(12.0).strong().color(GREEN));
+                });
+            } else {
+                self.input_source_picker(ui);
+            }
+
+            ui.add_space(12.0);
+            // ── SYNC WINDOW: group near-simultaneous presses onto one frame ──
+            ui.label(RichText::new("SYNC WINDOW").size(12.0).strong().color(TEAL));
+            ui.label(RichText::new("Groups near-simultaneous presses onto one game frame \u{2014} so a dash doesn't split into a stray jab.").size(11.0).color(Color32::GRAY));
+            let mut enabled = s.enabled.load(Ordering::Relaxed) != 0;
+            if ui.checkbox(&mut enabled, RichText::new("On").size(14.0)).changed() {
+                s.enabled.store(enabled as u32, Ordering::Relaxed);
+            }
+            ui.horizontal(|ui| {
+                ui.label("Window:");
+                let mut w = s.window_ms[0].load(Ordering::Relaxed).clamp(1, 16);
+                if ui.add(egui::Slider::new(&mut w, 1..=16).suffix(" ms")).changed() {
+                    s.window_ms[0].store(w, Ordering::Relaxed);
+                }
+                ui.label(RichText::new("(set it from the Finger Gap Tester)").size(11.0).color(Color32::DARK_GRAY));
+            });
+
+            // ── Extreme Low Latency badge (fuller readout) ──
+            if bulk_rate > 0 {
+                ui.add_space(10.0);
+                let khz = bulk_rate as f32 / 1000.0;
+                let fresh_us = 1_000_000 / bulk_rate;
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new("\u{26A1} EXTREME LOW LATENCY").size(12.0).strong().color(GREEN));
+                    ui.label(RichText::new(format!("\u{2014} {khz:.1} kHz stream (~{fresh_us} \u{00B5}s fresh); whole path < 200 \u{00B5}s vs ~500 \u{00B5}s XInput")).size(11.0).color(Color32::GRAY));
+                });
+            }
+
+            // ── Advanced: output type + stick hiding + the explainer ──
+            ui.add_space(12.0);
+            let mut pt = self.pad_type;
+            let mut pt_changed = false;
+            ui.collapsing(RichText::new("Advanced").size(12.0).color(Color32::GRAY), |ui| {
+                ui.label(RichText::new("OUTPUT \u{2014} what games see").size(11.0).strong().color(Color32::GRAY));
+                ui.radio_value(&mut pt, PadType::Xinput, "XInput / Xbox pad (works in the most games)");
+                ui.radio_value(&mut pt, PadType::Hid, "Branded \u{201C}NOBD Controller\u{201D} (Steam / DirectInput games)");
+                pt_changed = pt != self.pad_type;
+
+                // Device hiding — only meaningful with a HID stick + HidHide installed.
+                if self.source_kind == SourceKind::Hid && crate::hidhide::is_installed() {
+                    ui.add_space(6.0);
+                    let mut hide = self.hide_stick;
+                    if ui.checkbox(&mut hide, "Hide my stick from games (show only NOBD Controller)").changed() {
+                        self.hide_stick = hide;
+                        self.apply_stick_hiding();
+                        self.persist_ui();
+                    }
+                }
+
+                ui.add_space(8.0);
+                egui::CollapsingHeader::new(RichText::new("\u{24D8}  How it works & setup").color(TEAL))
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        ui.label(RichText::new("Setup").strong());
+                        ui.label("1.  Connect your controller.");
+                        ui.label("2.  Turn NOBD On (one-time admin prompt). It auto-detects your pad, creates the NOBD Controller, and starts syncing.");
+                        ui.label("3.  Turn on the sync window; set it from the Finger Gap Tester.");
+                        ui.label(format!("4.  In your game's controller settings, select \"{steam_name}\" \u{2014} your stick drives it, grouped."));
+                        ui.add_space(8.0);
+                        ui.label(RichText::new("How it works").strong());
+                        ui.label("A ~1 kHz background thread reads your stick and runs the sync window on its own clock, like the controller firmware. The grouped result is delivered as the native NOBD Controller \u{2014} universal, not tied to one game. Near-simultaneous attacks land on the same frame; a lone press costs a frame only if it lands in the last few ms before a read. Directions are never delayed.");
+                        ui.add_space(8.0);
+                        ui.label(RichText::new("The frame-boundary issue").strong());
+                        ui.label("Old games like MvC2 read your controller exactly ONCE per frame \u{2014} 60 times a second, every 16.67 ms. On modern hardware your stick updates far faster (1000 Hz+) than the game reads (60 Hz), so two buttons a few ms apart \u{2014} your natural finger gap \u{2014} can land on either side of a single read: a dash becomes a stray jab. NOBD groups near-simultaneous presses so they reach the game together, on the frame it actually reads. It changes WHEN a press reports, never WHICH buttons.");
+                    });
+            });
+            if pt_changed {
+                self.pad_type = pt;
+                // New output mode needs its own devnode — turn off until the user turns it back on.
+                self.controller_present = false;
+                self.sync_service = crate::sync_service::SyncService::stopped();
+                self.apply_stick_hiding();
+                self.persist_ui();
             }
         });
-        ui.weak("Set this from your finger gap on the Finger Gap Tester tab. 16 ms = one 60fps frame (the honest max).");
-
-        // ── Everything explanatory folds in here — open it once, then forget it. ──
-        ui.add_space(10.0);
-        egui::CollapsingHeader::new(RichText::new("\u{24D8}  How it works & setup").color(TEAL))
-            .default_open(false)
-            .show(ui, |ui| {
-                ui.label(RichText::new("Setup").strong());
-                ui.label("1.  Connect your controller.");
-                ui.label("2.  Click Turn NOBD On (one-time admin prompt). It auto-detects your pad, creates the NOBD Controller, and starts syncing.");
-                ui.label("3.  Turn on the sync window above; set it from the Finger Gap Tester.");
-                ui.label(format!(
-                    "4.  In your game's controller settings, select \"{steam_name}\" \u{2014} your stick drives it, grouped."
-                ));
-
-                ui.add_space(8.0);
-                ui.label(RichText::new("How it works").strong());
-                ui.label(
-                    "A ~1 kHz background thread reads your stick and runs the sync window on its own \
-                     clock, like the controller firmware. The grouped result is delivered as the \
-                     native NOBD Controller \u{2014} universal, not tied to one game. Near-simultaneous \
-                     attacks land on the same frame; a lone press costs a frame only if it lands in \
-                     the last few ms before a read. Directions are never delayed.",
-                );
-
-                ui.add_space(8.0);
-                ui.label(RichText::new("The frame-boundary issue").strong());
-                ui.label(
-                    "Old games like MvC2 read your controller exactly ONCE per frame \u{2014} 60 times \
-                     a second, every 16.67 ms. On modern hardware your stick updates far faster \
-                     (1000 Hz+) than the game reads (60 Hz), so two buttons a few ms apart \u{2014} your \
-                     natural finger gap \u{2014} can land on either side of a single read: a dash \
-                     becomes a stray jab. NOBD groups near-simultaneous presses so they reach the game \
-                     together, on the frame it actually reads. It changes WHEN a press reports, never \
-                     WHICH buttons.",
-                );
-            });
-    });
+    }
 }
 
 // ─── GAP TESTER TAB ───
 
 impl FingerGapApp {
-fn draw_gap_tester(&self, ctx: &egui::Context) {
+fn draw_gap_tester(&mut self, ctx: &egui::Context) {
     // All present controllers (unfiltered). The dashboard's target selector
     // labels our own companion "NOBD output" rather than hiding it — YOU pick
     // what to analyze, so the verdict never flips between raw and synced on its own.
@@ -981,6 +937,20 @@ fn draw_gap_tester(&self, ctx: &egui::Context) {
             }
         });
         ui.separator();
+        // Decision window: how many recent chords the ON/OFF grouping verdict averages over. It lives
+        // here now (a tester tuning), not in the top bar. Lower = flips faster when you toggle NOBD.
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Decision window").size(12.0).color(Color32::GRAY));
+            ui.add(
+                egui::Slider::new(
+                    &mut self.decision_window,
+                    crate::stats::MIN_WINDOW..=crate::stats::MAX_WINDOW,
+                )
+                .suffix(" chords"),
+            )
+            .on_hover_text("How many recent chords the ON/OFF verdict is based on. Lower = flips faster when you toggle NOBD; higher = steadier.");
+        });
+        ui.add_space(4.0);
         if all_controllers.is_empty() {
             ui.add_space(20.0);
             ui.vertical_centered(|ui| {
