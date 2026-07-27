@@ -18,17 +18,21 @@ use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
 };
 use windows_sys::Win32::Devices::Usb::{
     WinUsb_Free, WinUsb_Initialize, WinUsb_QueryPipe, WinUsb_ReadPipe, WinUsb_SetPipePolicy,
-    UsbdPipeTypeBulk, RAW_IO, WINUSB_INTERFACE_HANDLE, WINUSB_PIPE_INFORMATION,
+    WinUsb_SetPowerPolicy, UsbdPipeTypeBulk, RAW_IO, WINUSB_INTERFACE_HANDLE, WINUSB_PIPE_INFORMATION,
 };
 use windows_sys::Win32::Foundation::{
-    CloseHandle, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
+    CloseHandle, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_OVERLAPPED, FILE_SHARE_READ, FILE_SHARE_WRITE,
     OPEN_EXISTING,
 };
-use windows_sys::Win32::System::Threading::CreateEventW;
-use windows_sys::Win32::System::IO::{GetOverlappedResult, OVERLAPPED};
+use windows_sys::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
+use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
+
+// WinUSB power-policy type AUTO_SUSPEND; set the value to 0 to keep the device out of USB selective
+// suspend (otherwise Windows suspends it after idle and the bulk stream dies).
+const WINUSB_AUTO_SUSPEND: u32 = 0x81;
 
 pub const NOBD_BULK_VID: u16 = 0xCAFE;
 pub const NOBD_BULK_PID: u16 = 0x4030;
@@ -172,6 +176,10 @@ fn stream_once(snap: &Arc<BulkSnapshot>) {
         if pipe_id == 0 { WinUsb_Free(wu); CloseHandle(h); return; }
         let raw: u8 = 1;
         WinUsb_SetPipePolicy(wu, pipe_id, RAW_IO, 1, &raw as *const u8 as *const _);
+        // Pin the device awake -- without this Windows selective-suspends it after idle and the bulk
+        // stream stops (the "works, then dies after idle, toggle NOBD to fix" bug).
+        let awake: u8 = 0;
+        WinUsb_SetPowerPolicy(wu, WINUSB_AUTO_SUSPEND, 1, &awake as *const u8 as *const _);
 
         let mut ov: OVERLAPPED = std::mem::zeroed();
         ov.hEvent = CreateEventW(std::ptr::null(), 1, 0, std::ptr::null());
@@ -186,8 +194,16 @@ fn stream_once(snap: &Arc<BulkSnapshot>) {
             let mut got = 0u32;
             let ok = WinUsb_ReadPipe(wu, pipe_id, buf.as_mut_ptr(), buf.len() as u32, &mut got, &mut ov);
             if ok == 0 {
-                // ERROR_IO_PENDING (997) -> wait for completion
-                if GetOverlappedResult(h, &ov, &mut got, 1) == 0 { break; }
+                // Read is pending. Wait on the event with a timeout instead of blocking forever: a
+                // ~10 kHz stream never gaps 250 ms, so a timeout means it stalled (suspend / wedge) --
+                // cancel + break so run_reader re-attaches. Also lets us notice stop promptly.
+                if WaitForSingleObject(ov.hEvent, 250) != WAIT_OBJECT_0 || snap.stop.load(Ordering::Relaxed) {
+                    CancelIoEx(h, &ov);
+                    let mut reap = 0u32;
+                    GetOverlappedResult(h, &ov, &mut reap, 1); // reap the cancelled transfer before cleanup
+                    break;
+                }
+                if GetOverlappedResult(h, &ov, &mut got, 0) == 0 { break; }
             }
             let mut off = 0usize;
             while off + 20 <= got as usize {
