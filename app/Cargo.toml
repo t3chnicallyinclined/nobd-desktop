@@ -25,6 +25,7 @@ windows-sys = { version = "0.52", features = [
     "Win32_Media",
     # Raw-HID input source: enumerate + open + read + decode HID gamepads.
     "Win32_Devices_HumanInterfaceDevice",
+    "Win32_Devices_Usb",
     "Win32_Devices_DeviceAndDriverInstallation",
     "Win32_Devices_Properties",
     "Win32_Storage_FileSystem",

@@ -144,9 +144,13 @@ impl FingerGapApp {
         };
         // The sync service reads the SAME source as the Gap Tester (a HID stick
         // if one is selected, else XInput).
-        let sync_src = match (source_kind, &selected_hid) {
-            (SourceKind::Hid, Some(id)) => crate::sync_service::SyncSource::Hid(id.clone()),
-            _ => crate::sync_service::SyncSource::XInput,
+        let sync_src = if crate::bulk::find_device_path(crate::bulk::NOBD_BULK_VID, crate::bulk::NOBD_BULK_PID).is_some() {
+            crate::sync_service::SyncSource::Bulk // Extreme Low Latency: stick is in NOBD Bulk mode
+        } else {
+            match (source_kind, &selected_hid) {
+                (SourceKind::Hid, Some(id)) => crate::sync_service::SyncSource::Hid(id.clone()),
+                _ => crate::sync_service::SyncSource::XInput,
+            }
         };
         // A restored HID pick counts as "pinned"; otherwise auto-detect on turn-on.
         let auto_input = selected_hid.is_none();
@@ -359,6 +363,11 @@ impl FingerGapApp {
     /// The input source the sync service should read — mirrors the app-wide
     /// picker (a HID stick if one is selected, else XInput).
     fn sync_source(&self) -> crate::sync_service::SyncSource {
+        // Extreme Low Latency: if the stick is in NOBD Bulk mode (streaming), read THAT regardless of
+        // the XInput/HID picker -- the bulk hop is ~90 us vs the ~500 us XInput poll.
+        if crate::bulk::find_device_path(crate::bulk::NOBD_BULK_VID, crate::bulk::NOBD_BULK_PID).is_some() {
+            return crate::sync_service::SyncSource::Bulk;
+        }
         match (self.source_kind, &self.selected_hid) {
             (SourceKind::Hid, Some(id)) => crate::sync_service::SyncSource::Hid(id.clone()),
             _ => crate::sync_service::SyncSource::XInput,
@@ -903,6 +912,48 @@ fn draw_gap_tester(&self, ctx: &egui::Context) {
 
     egui::CentralPanel::default().show(ctx, |ui| {
         ui.add_space(4.0);
+        // Companion submit->readable latency (Track-B probe, measured once when XInput sync starts):
+        // how fresh a submit reaches a game's XInputGetState. <100us => the companion carries fresh
+        // data past the 1kHz wall, so feeding it from a faster stick source is worth it.
+        if let Some((mn, avg, mx)) = self.sync_service.latency() {
+            let col = if avg < 100 { GREEN } else if avg < 500 { YELLOW } else { RED };
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new("Companion latency:").size(12.0).color(Color32::GRAY));
+                ui.label(RichText::new(format!("{avg} \u{00B5}s")).size(13.0).strong().color(col));
+                ui.label(
+                    RichText::new(format!("(min {mn} / max {mx})"))
+                        .size(11.0)
+                        .color(Color32::DARK_GRAY),
+                );
+                ui.label(
+                    RichText::new(if avg < 100 {
+                        "\u{2014} sub-1kHz fresh \u{2713}"
+                    } else {
+                        "\u{2014} vs ~500\u{00B5}s real-pad floor"
+                    })
+                    .size(11.0)
+                    .color(Color32::GRAY),
+                );
+            });
+            ui.add_space(2.0);
+        }
+        // Extreme Low Latency: when the stick is in NOBD Bulk mode, show the live stream rate -- the
+        // stick->app freshness. At ~10 kHz the input is at most ~100 us old when the app reads it, vs the
+        // ~500 us XInput poll it replaces; paired with the ~54 us companion hop, the whole path is < 200 us.
+        let bulk_rate = self.sync_service.bulk_rate();
+        if bulk_rate > 0 {
+            let khz = bulk_rate as f32 / 1000.0;
+            let fresh_us = 1_000_000 / bulk_rate;
+            let col = if bulk_rate >= 4000 { GREEN } else if bulk_rate >= 1000 { YELLOW } else { RED };
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new("\u{26A1} Extreme mode:").size(13.0).strong().color(col));
+                ui.label(RichText::new(format!("stick \u{2192} app {khz:.1} kHz")).size(13.0).strong().color(col));
+                ui.label(RichText::new(format!("(~{fresh_us} \u{00B5}s fresh)")).size(11.0).color(Color32::DARK_GRAY));
+                ui.label(RichText::new("\u{2192} companion ~54 \u{00B5}s \u{2192} game").size(11.0).color(Color32::GRAY));
+                ui.label(RichText::new("\u{2014} whole path < 200 \u{00B5}s vs ~500 \u{00B5}s XInput \u{2713}").size(11.0).color(GREEN));
+            });
+            ui.add_space(2.0);
+        }
         // Compact header: the prompt + which input is live, on one line. The full
         // explanation lives under "How it works" on the Sync tab — not repeated here.
         ui.horizontal_wrapped(|ui| {
@@ -911,17 +962,21 @@ fn draw_gap_tester(&self, ctx: &egui::Context) {
                     .size(12.0)
                     .color(Color32::GRAY),
             );
-            match self.source_kind {
-                SourceKind::XInput => {
-                    ui.label(RichText::new("· Source: XInput").size(12.0).color(Color32::GRAY));
-                }
-                SourceKind::Hid => {
-                    let label = if self.selected_hid_label.is_empty() {
-                        "(no device)"
-                    } else {
-                        self.selected_hid_label.as_str()
-                    };
-                    ui.label(RichText::new(format!("· Source: {label}")).size(12.0).color(TEAL));
+            if bulk_rate > 0 {
+                ui.label(RichText::new("· Source: NOBD Bulk (Extreme)").size(12.0).color(TEAL));
+            } else {
+                match self.source_kind {
+                    SourceKind::XInput => {
+                        ui.label(RichText::new("· Source: XInput").size(12.0).color(Color32::GRAY));
+                    }
+                    SourceKind::Hid => {
+                        let label = if self.selected_hid_label.is_empty() {
+                            "(no device)"
+                        } else {
+                            self.selected_hid_label.as_str()
+                        };
+                        ui.label(RichText::new(format!("· Source: {label}")).size(12.0).color(TEAL));
+                    }
                 }
             }
         });

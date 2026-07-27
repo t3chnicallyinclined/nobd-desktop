@@ -70,6 +70,9 @@ pub enum SyncSource {
     /// non-XInput stick into an XInput-only game (the companion becomes the only
     /// XInput pad the game sees).
     Hid(crate::hid::HidDeviceId),
+    /// NOBD Bulk (Extreme Low Latency): the stick's WinUSB bulk stream (~10 kHz / ~90 us) instead of
+    /// its XInput poll (~500 us). The companion is still the game-facing XInput pad.
+    Bulk,
 }
 
 type XInputGetStateFn = unsafe extern "system" fn(u32, *mut XINPUT_STATE) -> u32;
@@ -116,6 +119,14 @@ pub struct SyncStatus {
     pub virtual_slot: AtomicU32,
     /// ERR_* code.
     pub error: AtomicU8,
+    /// Companion submit->readable latency in us (min/avg/max), measured once when XInput sync
+    /// starts. 0 = not measured. This is how fresh a submit reaches a game's XInputGetState.
+    pub lat_min: AtomicU32,
+    pub lat_avg: AtomicU32,
+    pub lat_max: AtomicU32,
+    /// NOBD Bulk stream rate (payloads/sec) in Extreme Low Latency mode; 0 = not in bulk mode. This is
+    /// the stick->app freshness: at this rate the input is at most ~1/rate old when the app reads it.
+    pub bulk_rate_hz: AtomicU32,
 }
 
 impl SyncStatus {
@@ -126,6 +137,10 @@ impl SyncStatus {
             real_slot: AtomicU32::new(NO_SLOT),
             virtual_slot: AtomicU32::new(NO_SLOT),
             error: AtomicU8::new(ERR_NONE),
+            lat_min: AtomicU32::new(0),
+            lat_avg: AtomicU32::new(0),
+            lat_max: AtomicU32::new(0),
+            bulk_rate_hz: AtomicU32::new(0),
         }
     }
 }
@@ -166,6 +181,25 @@ impl SyncService {
         self.status.real_present.load(Ordering::Relaxed)
     }
 
+    /// (min, avg, max) us of the companion submit->readable latency, if measured (XInput mode).
+    pub fn latency(&self) -> Option<(u32, u32, u32)> {
+        let avg = self.status.lat_avg.load(Ordering::Relaxed);
+        if avg == 0 {
+            None
+        } else {
+            Some((
+                self.status.lat_min.load(Ordering::Relaxed),
+                avg,
+                self.status.lat_max.load(Ordering::Relaxed),
+            ))
+        }
+    }
+
+    /// NOBD Bulk stream rate (payloads/sec) in Extreme Low Latency mode; 0 when not in bulk mode.
+    pub fn bulk_rate(&self) -> u32 {
+        self.status.bulk_rate_hz.load(Ordering::Relaxed)
+    }
+
     pub fn real_slot(&self) -> Option<u32> {
         let s = self.status.real_slot.load(Ordering::Relaxed);
         if s == NO_SLOT {
@@ -203,7 +237,52 @@ fn run(stop: Arc<AtomicBool>, status: Arc<SyncStatus>, pad: PadType, source: Syn
     match source {
         SyncSource::XInput => run_xinput(stop, status, pad),
         SyncSource::Hid(id) => run_hid(stop, status, pad, id),
+        SyncSource::Bulk => run_bulk(stop, status, pad),
     }
+}
+
+/// Extreme Low Latency: read the stick's WinUSB bulk stream (~10 kHz) and present the grouped result
+/// as the XUSB companion. Mirrors run_hid, but the source is the ~90 us bulk hop, not the ~500 us
+/// XInput poll -- so the whole button->game path collapses toward the companion's ~54 us floor.
+fn run_bulk(stop: Arc<AtomicBool>, status: Arc<SyncStatus>, pad: PadType) {
+    let snap = crate::bulk::BulkSnapshot::new();
+    {
+        let snap = snap.clone();
+        std::thread::spawn(move || crate::bulk::run_reader(snap));
+    }
+    let mut ctrl = match hm_native::NobdController::open(pad.mode()) {
+        Ok(c) => c,
+        Err(_) => {
+            status.error.store(ERR_NO_NOBD, Ordering::Relaxed);
+            return;
+        }
+    };
+    unsafe { timeBeginPeriod(1) };
+    status.active.store(true, Ordering::Relaxed);
+    status.error.store(ERR_NONE, Ordering::Relaxed);
+
+    let epoch = Instant::now();
+    let mut sync = SyncWindow::new();
+    while !stop.load(Ordering::Relaxed) {
+        let now_us = epoch.elapsed().as_micros() as u64;
+        let s = nobd_shared::state();
+        let enabled = s.enabled.load(Ordering::Relaxed) != 0;
+        let window_us = s.window_ms[0].load(Ordering::Relaxed).clamp(1, 16) * 1000;
+
+        if snap.present() {
+            status.real_present.store(true, Ordering::Relaxed);
+            let (buttons, lt, rt, lx, ly, rx, ry) = snap.get();
+            let grouped = sync.process(buttons, ATTACK_MASK, ATTACK_MASK, now_us, window_us, enabled);
+            ctrl.submit(grouped, lt, rt, lx, ly, rx, ry);
+        } else {
+            status.real_present.store(false, Ordering::Relaxed);
+        }
+        status.bulk_rate_hz.store(snap.rate_hz(), Ordering::Relaxed);
+        std::thread::sleep(Duration::from_micros(250)); // ~4 kHz submit; the source is already ~10 kHz fresh
+    }
+    status.active.store(false, Ordering::Relaxed);
+    status.bulk_rate_hz.store(0, Ordering::Relaxed);
+    snap.stop(); // signal the reader thread to exit
 }
 
 /// Read a raw HID (DirectInput) stick and present the grouped result as the NOBD
@@ -305,6 +384,44 @@ fn run_xinput(stop: Arc<AtomicBool>, status: Arc<SyncStatus>, pad: PadType) {
             prev = hit;
         }
         ctrl.submit(0, 0, 0, 0, 0, 0, 0); // release the marker
+    }
+
+    // Track-B probe: measure the companion submit->readable latency ONCE. Write a unique LX marker,
+    // tight-read the companion slot until it appears, time it -- how fresh a submit reaches a game's
+    // XInputGetState. Real-controller floor ~500us; <100us means the companion carries fresh data,
+    // so feeding it from a faster stick source (the bulk stream) is worth building.
+    if let Some(cslot) = companion_slot {
+        let mut samples: Vec<u64> = Vec::with_capacity(500);
+        let mut counter: i16 = 777;
+        for _ in 0..500 {
+            if stop.load(Ordering::Relaxed) {
+                return;
+            }
+            counter = counter.wrapping_add(101);
+            if counter == 0 {
+                counter = 1;
+            }
+            let t0 = Instant::now();
+            ctrl.submit(0, 0, 0, counter, 0, 0, 0);
+            while t0.elapsed() < Duration::from_millis(10) {
+                if xinput_state(xi, cslot).map_or(false, |st| st.Gamepad.sThumbLX == counter) {
+                    break;
+                }
+            }
+            samples.push(t0.elapsed().as_micros() as u64);
+        }
+        ctrl.submit(0, 0, 0, 0, 0, 0, 0); // release
+        if !samples.is_empty() {
+            samples.sort_unstable();
+            let sum: u64 = samples.iter().sum();
+            status.lat_min.store(samples[0] as u32, Ordering::Relaxed);
+            status
+                .lat_avg
+                .store((sum / samples.len() as u64) as u32, Ordering::Relaxed);
+            status
+                .lat_max
+                .store(samples[samples.len() - 1] as u32, Ordering::Relaxed);
+        }
     }
 
     // Wait for the real pad = the first present slot that is NOT our companion.

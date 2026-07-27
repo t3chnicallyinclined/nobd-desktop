@@ -2,6 +2,7 @@
 #![windows_subsystem = "windows"]
 
 mod app;
+mod bulk;
 mod hid;
 mod hidhide;
 mod input;
