@@ -127,8 +127,11 @@ pub fn relaunch_elevated_for_setup(mode: PadType) -> io::Result<()> {
 }
 
 /// Register a Scheduled Task that relaunches nobd.exe elevated at logon, so
-/// after setup there is no per-launch UAC prompt (config-1).
-fn register_login_task() -> io::Result<()> {
+/// after setup there is no per-launch UAC prompt (config-1). Re-registering also
+/// repoints the task at the CURRENT exe, so calling it again repairs a stale path.
+/// Requires elevation (RL HIGHEST). Public so the "Start with Windows" toggle can
+/// re-arm it, not just first-run setup.
+pub fn register_login_task() -> io::Result<()> {
     let exe = std::env::current_exe()?;
     let status = Command::new("schtasks")
         .args([
@@ -149,5 +152,31 @@ fn register_login_task() -> io::Result<()> {
         Ok(())
     } else {
         Err(io::Error::other("schtasks /Create failed"))
+    }
+}
+
+/// Whether the auto-elevate logon task is currently registered (i.e. the app is
+/// set to start with Windows). Cheap-ish (spawns schtasks) -- cache it, don't
+/// poll it per frame.
+pub fn login_task_present() -> bool {
+    Command::new("schtasks")
+        .args(["/Query", "/TN", TASK_NAME])
+        .creation_flags(CREATE_NO_WINDOW)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Remove the auto-elevate logon task (stop starting with Windows). Requires
+/// elevation, since the task runs with HIGHEST privileges.
+pub fn unregister_login_task() -> io::Result<()> {
+    let status = Command::new("schtasks")
+        .args(["/Delete", "/TN", TASK_NAME, "/F"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::other("schtasks /Delete failed"))
     }
 }

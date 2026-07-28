@@ -112,6 +112,9 @@ pub struct FingerGapApp {
     /// Auto-detect the input controller on turn-on. Cleared the moment the user
     /// pins a controller in Advanced, so their choice is respected.
     auto_input: bool,
+    /// Cached "start with Windows" state (the elevated logon task). Queried once at
+    /// startup + updated on toggle -- never polled per frame (schtasks spawns a process).
+    autostart_enabled: bool,
 }
 
 impl FingerGapApp {
@@ -178,6 +181,7 @@ impl FingerGapApp {
             hide_stick: ui_cfg.hide_stick != 0,
             startup_hide_done: false,
             auto_input,
+            autostart_enabled: crate::nobd_setup::login_task_present(),
         }
     }
 
@@ -710,6 +714,28 @@ impl FingerGapApp {
                 ui.colored_label(RED, "\u{25CF} XInput unavailable on this system");
             } else if self.sync_service.is_active() && !self.sync_service.real_present() {
                 ui.colored_label(YELLOW, "\u{25CF} Controller connected \u{2014} press a button to start it reporting\u{2026}");
+            }
+
+            // Start with Windows: the elevated logon task brings the app (and your controller) back on
+            // every boot with no clicks + no UAC. Surfaced here so it's visible + repairable, not a
+            // silent best-effort during setup. Re-checking repoints the task at the current exe.
+            if self.controller_present {
+                let mut autostart = self.autostart_enabled;
+                if ui
+                    .checkbox(&mut autostart, "Start automatically with Windows")
+                    .on_hover_text("Runs NOBD in the tray at login (elevated, no UAC) so your controller works without ever opening this app.")
+                    .changed()
+                {
+                    let res = if autostart {
+                        crate::nobd_setup::register_login_task()
+                    } else {
+                        crate::nobd_setup::unregister_login_task()
+                    };
+                    match res {
+                        Ok(()) => self.autostart_enabled = autostart,
+                        Err(e) => self.setup_msg = Some(format!("Couldn't change auto-start: {e}")),
+                    }
+                }
             }
 
             ui.add_space(8.0);
