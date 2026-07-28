@@ -115,6 +115,10 @@ pub struct FingerGapApp {
     /// Cached "start with Windows" state (the elevated logon task). Queried once at
     /// startup + updated on toggle -- never polled per frame (schtasks spawns a process).
     autostart_enabled: bool,
+    /// Hotplug watchdog: re-adopt the bulk stick when it (re)appears so a replug doesn't need a manual
+    /// NOBD toggle. `hotplug_at` throttles the ~1 Hz poll; `bulk_was_present` edge-detects absent->present.
+    hotplug_at: std::time::Instant,
+    bulk_was_present: bool,
 }
 
 impl FingerGapApp {
@@ -147,7 +151,9 @@ impl FingerGapApp {
         };
         // The sync service reads the SAME source as the Gap Tester (a HID stick
         // if one is selected, else XInput).
-        let sync_src = if crate::bulk::find_device_path(crate::bulk::NOBD_BULK_VID, crate::bulk::NOBD_BULK_PID).is_some() {
+        let bulk_present =
+            crate::bulk::find_device_path(crate::bulk::NOBD_BULK_VID, crate::bulk::NOBD_BULK_PID).is_some();
+        let sync_src = if bulk_present {
             crate::sync_service::SyncSource::Bulk // Extreme Low Latency: stick is in NOBD Bulk mode
         } else {
             match (source_kind, &selected_hid) {
@@ -182,6 +188,8 @@ impl FingerGapApp {
             startup_hide_done: false,
             auto_input,
             autostart_enabled: crate::nobd_setup::login_task_present(),
+            hotplug_at: std::time::Instant::now(),
+            bulk_was_present: bulk_present,
         }
     }
 
@@ -495,6 +503,26 @@ impl eframe::App for FingerGapApp {
                     Err(e) => self.setup_msg = Some(format!("Enable failed: {e}")),
                 }
                 self.setup_rx = None;
+            }
+        }
+
+        // Hotplug watchdog: the sync resolves its source once at start, so a bulk stick that's
+        // unplugged then replugged can leave it stuck on the old source until a manual NOBD toggle.
+        // Poll the bulk device at ~1 Hz; the moment it (re)appears, re-resolve + restart the sync --
+        // exactly what toggling NOBD off/on does, but automatic.
+        if self.controller_present {
+            let now = std::time::Instant::now();
+            if now.duration_since(self.hotplug_at) >= std::time::Duration::from_millis(1000) {
+                self.hotplug_at = now;
+                let present = crate::bulk::find_device_path(
+                    crate::bulk::NOBD_BULK_VID,
+                    crate::bulk::NOBD_BULK_PID,
+                )
+                .is_some();
+                if present && !self.bulk_was_present {
+                    self.restart_sync_if_present(); // device just (re)appeared -> re-adopt it
+                }
+                self.bulk_was_present = present;
             }
         }
 
