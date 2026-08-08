@@ -1,0 +1,47 @@
+[Unit]
+Description=NOBD sync window (input daemon)
+Documentation=https://github.com/t3chnicallyinclined/nobd-desktop
+# Nothing to wait for: the daemon polls for its stick and adopts it on hotplug,
+# so starting before the device exists is fine and shaves startup off the path.
+After=systemd-udev-settle.service
+Wants=systemd-udev-settle.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/nobdd run
+Restart=always
+RestartSec=1
+
+# --- what makes the latency claims true ----------------------------------
+# The daemon applies SCHED_FIFO, mlockall, timer slack and the CPU latency QoS
+# itself (and reports which ones took — see `nobdd tune`). These limits are what
+# allow it to, and they are the only elevated things it needs.
+LimitRTPRIO=99
+LimitMEMLOCK=infinity
+LimitNICE=-20
+
+# Raise the OOM bar: a killed input daemon means a stuck button mid-match.
+OOMScoreAdjust=-500
+
+# --- hardening ------------------------------------------------------------
+# Runs as root because it needs /dev/uinput, usbfs and /dev/cpu_dma_latency, but
+# everything it does not need is taken away. If you prefer a non-root daemon,
+# the udev rules in 83-nobd.rules already grant the `nobd` group all three —
+# set User=nobd and add AmbientCapabilities=CAP_SYS_NICE CAP_IPC_LOCK.
+CapabilityBoundingSet=CAP_SYS_NICE CAP_IPC_LOCK CAP_SYS_ADMIN CAP_DAC_OVERRIDE CAP_CHOWN CAP_FOWNER
+ProtectHome=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictRealtime=no
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+# /run/nobd for the control socket.
+RuntimeDirectory=nobd
+RuntimeDirectoryMode=0755
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,5 @@
+# Linux-side files MUST keep LF line endings regardless of the checkout host.
+# A stray CR in a shell script's shebang gives "bad interpreter: /bin/bash^M";
+# in a udev rule or a systemd unit it silently fails to parse. These are
+# authored on Windows, so pin them explicitly.
+linux/packaging/** text eol=lf

@@ -1,0 +1,88 @@
+name: Linux daemon
+
+on:
+  push:
+    branches: [master, main]
+    paths: ['linux/**', 'shared/**', 'Cargo.toml', 'Cargo.lock', '.github/workflows/linux.yml']
+  pull_request:
+    paths: ['linux/**', 'shared/**', 'Cargo.toml', 'Cargo.lock']
+  # Publishing a GitHub Release attaches the tarball to it.
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal --component clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: '. -> target'
+
+      # Only the two portable crates build here; `app` and `hm-native` are
+      # Windows-only by design and are never selected.
+      - name: Check
+        run: cargo check -p nobd-linux -p nobd-shared --all-targets
+
+      - name: Clippy
+        run: cargo clippy -p nobd-linux -p nobd-shared --all-targets -- -D warnings
+
+      # The interesting tests are the ones a wrong constant would silently break:
+      # the _IOC arithmetic against the real kernel headers' values, the struct
+      # layouts, the sync-window parity cases, and the config validation.
+      - name: Test
+        run: cargo test -p nobd-linux -p nobd-shared
+
+      - name: Build release
+        run: cargo build -p nobd-linux --release
+
+      # Smoke-test on the runner. There is no stick and no /dev/uinput access, so
+      # this asserts the binary runs and reports honestly rather than crashing —
+      # exactly the paths a user hits before their udev rule is installed.
+      - name: Smoke test
+        run: |
+          set -x
+          ./target/release/nobdd --version
+          ./target/release/nobdd --help
+          # `list` and `tune` must succeed even with no devices and no privilege.
+          ./target/release/nobdd list
+          ./target/release/nobdd tune
+          # `probe` must fail cleanly (no uinput on the runner), not panic.
+          if ./target/release/nobdd probe 10; then
+            echo "probe unexpectedly succeeded (uinput available?) — fine"
+          else
+            echo "probe failed as expected on a runner without /dev/uinput"
+          fi
+
+      - name: Package
+        run: |
+          set -eu
+          v="$(grep -m1 '^version' linux/Cargo.toml | cut -d'"' -f2)"
+          d="nobd-linux-$v-x86_64"
+          mkdir -p "dist/$d"
+          cp target/release/nobdd "dist/$d/"
+          cp linux/packaging/* "dist/$d/"
+          cp docs/LINUX.md "dist/$d/README.md"
+          chmod +x "dist/$d/install.sh"
+          tar -C dist -czf "dist/$d.tar.gz" "$d"
+          echo "TARBALL=dist/$d.tar.gz" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nobd-linux-x86_64
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+      - name: Attach to release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.event.release.tag_name }}" "$TARBALL" --clobber

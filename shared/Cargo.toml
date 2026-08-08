@@ -5,6 +5,11 @@ edition = "2021"
 description = "Shared-memory NOBD sync config + stats, mapped by both DINPUT8.dll and nobd.exe"
 
 [dependencies]
+
+# The named-section backing store is Windows-only. On Linux the daemon is a
+# single process, so `state()` is backed by a leaked allocation instead and the
+# rest of the crate (notably `sync_window`) is portable as-is.
+[target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.52", features = [
     "Win32_Foundation",
     "Win32_System_Memory",

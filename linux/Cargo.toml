@@ -1,0 +1,18 @@
+[package]
+name = "nobd-linux"
+version = "0.1.0"
+edition = "2021"
+description = "nobdd — the NOBD sync window as a Linux input daemon: evdev/USB-bulk in, virtual Xbox pad out, deadline-exact and latency-tuned."
+
+[[bin]]
+name = "nobdd"
+path = "src/main.rs"
+
+# libc only. Every kernel interface we touch (evdev, uinput, usbfs, epoll,
+# timerfd, sched, mlock) is driven by raw ioctl/syscall so the hot loop is
+# exactly what we wrote — no wrapper allocations, no hidden threads, no async
+# runtime between a button edge and the uinput write.
+# (Release profile is inherited from the workspace root.)
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+nobd-shared = { path = "../shared" }

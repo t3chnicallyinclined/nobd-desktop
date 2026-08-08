@@ -1682,6 +1682,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "nobd-linux"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "nobd-shared",
+]
+
+[[package]]
 name = "nobd-shared"
 version = "0.2.0"
 dependencies = [

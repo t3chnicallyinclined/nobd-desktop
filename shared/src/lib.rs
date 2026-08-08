@@ -1,13 +1,18 @@
-//! Shared-memory NOBD state. Both DINPUT8.dll (in the game) and nobd.exe map the
-//! same named region, so the app can drive the latch live and read real in-game
-//! stats. Config fields are shared; stats are per-player (P1/P2), written by the
-//! DLL and read by the app.
+//! Shared NOBD state. On Windows this is a named section mapped by every
+//! component, so the app can drive the latch live and read real in-game stats.
+//! On Linux the daemon is a single process, so the same struct is simply a
+//! process-local allocation — `state()` has identical semantics on both, and
+//! everything above it (including `sync_window`) is platform-agnostic.
+//!
+//! Config fields are shared; stats are per-player (P1/P2).
 
 pub mod sync_window;
 
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::OnceLock;
+#[cfg(windows)]
 use windows_sys::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS, INVALID_HANDLE_VALUE};
+#[cfg(windows)]
 use windows_sys::Win32::System::Memory::{
     CreateFileMappingW, MapViewOfFile, FILE_MAP_ALL_ACCESS, PAGE_READWRITE,
 };
@@ -21,6 +26,7 @@ pub const NUM_PLAYERS: usize = 2;
 
 // Fixed mapping size, decoupled from the struct size, so adding fields later
 // never changes the region size. The struct must stay well under this.
+#[cfg(windows)]
 const MAP_SIZE: usize = 4096;
 
 /// Per-player live stats (DLL writes, app reads). One per controller slot.
@@ -156,6 +162,18 @@ pub fn state() -> &'static SharedState {
     unsafe { &*(p as *const SharedState) }
 }
 
+/// Single-process backing store: a leaked, default-initialised `SharedState`.
+/// Same contract as the Windows mapping (stable address for the process life),
+/// without a kernel object — the Linux daemon owns the only copy.
+#[cfg(not(windows))]
+unsafe fn map_or_create() -> usize {
+    let b: Box<SharedState> = unsafe { Box::new(std::mem::zeroed()) };
+    let p = Box::leak(b);
+    p.init_defaults();
+    p as *const SharedState as usize
+}
+
+#[cfg(windows)]
 unsafe fn map_or_create() -> usize {
     assert!(std::mem::size_of::<SharedState>() <= MAP_SIZE, "SharedState exceeds MAP_SIZE");
     let name: Vec<u16> = "Local\\NobdSyncState\0".encode_utf16().collect();

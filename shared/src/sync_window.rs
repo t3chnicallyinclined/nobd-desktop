@@ -32,6 +32,33 @@ impl SyncWindow {
         *self = Self::new();
     }
 
+    /// Absolute time (same clock as `process`'s `now_us`) at which an open
+    /// window expires, or `None` when nothing is pending.
+    ///
+    /// A poll-driven caller doesn't need this — it just calls `process` every
+    /// tick and the window closes on whichever tick follows expiry. An
+    /// event-driven caller does: the Linux daemon arms a `timerfd` on exactly
+    /// this deadline so the commit lands at the window edge rather than at the
+    /// next poll slot, which is the difference between honouring a 5 ms window
+    /// to ~20 µs and to ~1 ms.
+    pub fn pending_until(&self, window_us: u32) -> Option<u64> {
+        if self.pending {
+            Some(self.start_us + window_us as u64)
+        } else {
+            None
+        }
+    }
+
+    /// When the currently-open window started, if any. Used for the "grouping
+    /// hold" stat (how long a lead press actually waited).
+    pub fn pending_since(&self) -> Option<u64> {
+        if self.pending {
+            Some(self.start_us)
+        } else {
+            None
+        }
+    }
+
     /// `raw`         : current raw button bits
     /// `attack_mask` : which bits count as attacks (>=2 of these => a chord)
     /// `synced_mask` : which bits are subject to the window (attacks only, or all)

@@ -1,0 +1,41 @@
+# NOBD — hide ONE physical stick from Steam / SDL / everything else, so the
+# game sees only the synced NOBD pad. This is the HidHide equivalent, and it is
+# opt-in because it changes how your stick behaves outside NOBD.
+#
+# WHY THIS IS A SEPARATE, LOWER-NUMBERED FILE
+# -------------------------------------------
+# `EVIOCGRAB` (which the daemon always does) gives us exclusive access to the
+# *evdev* node — but Steam reads controllers it recognises through **hidraw**,
+# which a grab does not cover. Without this rule you get double input: the game
+# sees both your raw stick and the NOBD pad, and the raw one is ungrouped.
+#
+# The number matters. udev's own 70-uaccess.rules grants your desktop session an
+# ACL on anything tagged `ID_INPUT_JOYSTICK`. Clearing that tag has to happen
+# *before* rule 70 is evaluated, hence 60. A rule numbered 83 would be too late
+# and would silently do nothing.
+#
+# HOW TO USE
+# ----------
+#   1. Find your stick's IDs:
+#          nobdd list
+#      e.g.  "1234:5678" from  [1234:5678 bus 0x03]
+#   2. Copy this file, substituting both IDs (lowercase hex, no 0x):
+#          sed 's/VVVV/1234/g; s/PPPP/5678/g' 60-nobd-hide.rules.template \
+#            | sudo tee /etc/udev/rules.d/60-nobd-hide.rules
+#   3. Reload and replug the stick:
+#          sudo udevadm control --reload-rules && sudo udevadm trigger
+#
+# TO UNDO: delete /etc/udev/rules.d/60-nobd-hide.rules, reload, replug.
+#
+# NOTE: with this active the stick is invisible to Steam even when nobdd is not
+# running. That is the intended trade — it is also why it is not installed by
+# default. If you would rather not, the lighter alternative is to turn Steam
+# Input off for the physical stick and leave this file out.
+
+# Strip the joystick markers so udev's uaccess rule never tags it, and SDL/Steam
+# skip it during enumeration.
+SUBSYSTEM=="input", ATTRS{idVendor}=="VVVV", ATTRS{idProduct}=="PPPP", ENV{ID_INPUT_JOYSTICK}="", ENV{ID_INPUT}="", MODE="0660", GROUP="nobd"
+
+# Take the raw HID node away from everyone but us. This is the half EVIOCGRAB
+# cannot reach.
+KERNEL=="hidraw*", ATTRS{idVendor}=="VVVV", ATTRS{idProduct}=="PPPP", MODE="0660", GROUP="nobd"

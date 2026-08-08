@@ -1,9 +1,17 @@
 [workspace]
-members = ["app", "shared", "hm-native"]
+members = ["app", "shared", "hm-native", "linux"]
 resolver = "2"
+
+# `app` and `hm-native` are Windows-only; `linux` is Linux-only. Nothing builds
+# the whole workspace at once — always select the package:
+#   Windows: cargo build -p nobd-app --release
+#   Linux:   cargo build -p nobd-linux --release
 
 # Universal sync replaced the per-game DINPUT8.dll, so the cdylib package is gone.
 [profile.release]
 opt-level = 2
 lto = true
 strip = true
+# One codegen unit: the sync loop is the product, and cross-unit inlining of the
+# window + source decode measurably tightens it. Costs build time only.
+codegen-units = 1

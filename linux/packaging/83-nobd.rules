@@ -1,0 +1,35 @@
+# NOBD Desktop (Linux) — device access.
+#
+# Installed to /etc/udev/rules.d/83-nobd.rules. On an immutable host (Bazzite,
+# Silverblue, SteamOS) /etc is writable and survives rpm-ostree/bootc updates,
+# so this needs no package layering and no reboot — just:
+#
+#   sudo udevadm control --reload-rules && sudo udevadm trigger
+#
+# Everything here grants the `nobd` group, never world. The install script
+# creates that group and adds the invoking user to it.
+
+# --- the virtual pad ------------------------------------------------------
+# /dev/uinput is the whole of what the Windows build needs a signed UMDF2
+# driver for. `static_node` applies the mode at module load, so the node is
+# usable the moment `uinput` is loaded rather than only after a device appears.
+KERNEL=="uinput", SUBSYSTEM=="misc", MODE="0660", GROUP="nobd", OPTIONS+="static_node=uinput"
+
+# --- CPU latency QoS ------------------------------------------------------
+# Writing 0 here and holding the fd open keeps the CPU out of deep C-states.
+# Root-only by default; the group grant is what lets a non-root daemon (and
+# `nobdd probe` run as your user) apply the single biggest interrupt-latency
+# tuning available.
+KERNEL=="cpu_dma_latency", MODE="0660", GROUP="nobd"
+
+# --- NOBD Bulk (Extreme Low Latency) --------------------------------------
+# The stick's vendor bulk interface, read directly through usbfs. On Windows
+# this path needs Zadig/WinUSB binding; here it needs exactly this line.
+SUBSYSTEM=="usb", ATTR{idVendor}=="cafe", ATTR{idProduct}=="4030", MODE="0660", GROUP="nobd"
+KERNEL=="hidraw*", ATTRS{idVendor}=="cafe", ATTRS{idProduct}=="4030", MODE="0660", GROUP="nobd"
+
+# --- sticks ---------------------------------------------------------------
+# Group-read on joystick event nodes so the daemon can open and EVIOCGRAB them.
+# This does NOT hide anything from Steam — see 60-nobd-hide.rules.template for
+# that, which has to run before udev's uaccess rules and so is numbered lower.
+SUBSYSTEM=="input", ENV{ID_INPUT_JOYSTICK}=="1", MODE="0660", GROUP="nobd"
