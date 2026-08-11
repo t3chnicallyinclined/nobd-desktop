@@ -228,6 +228,22 @@ pub fn create_companion(
         let _ = params.set_value("ControllerIndex", &index);
     }
 
+    /* AND RESTART IT, because the driver has already started and already looked.
+     *
+     * SwDeviceCreate mints the instance id, so ControllerIndex cannot be written until it returns
+     * -- by which point the driver's start callback has run, found nothing, and failed. The devnode
+     * then sits at CM_PROB_FAILED_POST_START (Code 43) while every outward sign says success: an
+     * instance id is returned, open() is Ok, submit() returns, and the latency measures ~0.4 us
+     * precisely because nothing is reading the section. The only visible symptom is that no gamepad
+     * appears anywhere.
+     *
+     * One restart, now that the value exists, and it starts cleanly. Verified by hand with
+     * `pnputil /restart-device` before this was added. Not fatal if it fails -- the device exists
+     * and a reboot has the same effect, so refusing the install would be worse. */
+    let restarted = crate::device::restart_device(&iid);
+    debug_assert!(restarted || cfg!(test), "device restart failed; a reboot will clear it");
+    let _ = restarted;
+
     Ok(iid)
 }
 

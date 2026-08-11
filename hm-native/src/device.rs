@@ -19,8 +19,9 @@ use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
     SetupDiCallClassInstaller, SetupDiCreateDeviceInfoList, SetupDiCreateDeviceInfoW,
     SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInfo, SetupDiGetClassDevsW,
     SetupDiGetDeviceInstanceIdW, SetupDiGetDeviceRegistryPropertyW, SetupDiOpenDeviceInfoW,
-    SetupDiSetDeviceRegistryPropertyW, UpdateDriverForPlugAndPlayDevicesW, HDEVINFO,
-    SP_DEVINFO_DATA,
+    SetupDiSetClassInstallParamsW, SetupDiSetDeviceRegistryPropertyW,
+    UpdateDriverForPlugAndPlayDevicesW, DICS_PROPCHANGE, DIF_PROPERTYCHANGE, HDEVINFO,
+    SP_CLASSINSTALL_HEADER, SP_DEVINFO_DATA, SP_PROPCHANGE_PARAMS,
 };
 
 use crate::report::REPORT_DESCRIPTOR;
@@ -251,6 +252,54 @@ pub fn remove_devices_by_hwid(needle: &str) -> u32 {
         }
     }
     removed
+}
+
+/// Restart a devnode: the equivalent of Disable-then-Enable, or
+/// `pnputil /restart-device`.
+///
+/// WHY THIS EXISTS. `swdevice::create_companion` writes `ControllerIndex` into the device's
+/// `Device Parameters` key so the driver knows which shared section to open — but it can only do
+/// that AFTER `SwDeviceCreate` returns, because that call is what mints the instance id. The driver
+/// has already started by then, found no `ControllerIndex`, and failed: the devnode sits at
+/// **CM_PROB_FAILED_POST_START (Code 43)** and `submit()` writes into a section nothing is reading.
+///
+/// Every symptom of that looks like success — the install reports an instance id, `open()` returns
+/// Ok, latency measures beautifully because no work happens — and the only outward sign is that no
+/// gamepad appears. Restarting the device once, after the value exists, makes it start cleanly;
+/// that was verified by hand with `pnputil /restart-device` before this was written.
+///
+/// Failure is deliberately non-fatal: the device already exists, and a user who reboots gets the
+/// same effect. Returning an error here would fail an install that has actually succeeded.
+pub fn restart_device(instance_id: &str) -> bool {
+    let wide: Vec<u16> = instance_id.encode_utf16().chain(std::iter::once(0)).collect();
+    unsafe {
+        let dis = SetupDiCreateDeviceInfoList(std::ptr::null(), 0);
+        if dis as isize == -1 {
+            return false;
+        }
+        let mut dev: SP_DEVINFO_DATA = std::mem::zeroed();
+        dev.cbSize = std::mem::size_of::<SP_DEVINFO_DATA>() as u32;
+        let mut ok = false;
+        if SetupDiOpenDeviceInfoW(dis, wide.as_ptr(), 0, 0, &mut dev) != 0 {
+            let mut params: SP_PROPCHANGE_PARAMS = std::mem::zeroed();
+            params.ClassInstallHeader = SP_CLASSINSTALL_HEADER {
+                cbSize: std::mem::size_of::<SP_CLASSINSTALL_HEADER>() as u32,
+                InstallFunction: DIF_PROPERTYCHANGE,
+            };
+            params.StateChange = DICS_PROPCHANGE;   /* stop then restart, in one call */
+            params.Scope = 0;                       /* DICS_FLAG_GLOBAL */
+            params.HwProfile = 0;
+            ok = SetupDiSetClassInstallParamsW(
+                    dis,
+                    &mut dev,
+                    &mut params.ClassInstallHeader,
+                    std::mem::size_of::<SP_PROPCHANGE_PARAMS>() as u32,
+                ) != 0
+                && SetupDiCallClassInstaller(DIF_PROPERTYCHANGE, dis, &mut dev) != 0;
+        }
+        SetupDiDestroyDeviceInfoList(dis);
+        ok
+    }
 }
 
 /// Create the ROOT\HIDClass devnode for our NOBD gamepad, tag it with
