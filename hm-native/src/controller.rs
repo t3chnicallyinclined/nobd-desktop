@@ -44,13 +44,11 @@ pub enum PadMode {
 /// One-time elevated setup for HID mode: install the vendored HID driver, create
 /// + brand the device. `cert_path`/`inf_path` point at the vendored bundle.
 pub fn setup_hid(cert_path: &str, inf_path: &str) -> io::Result<String> {
-    // Trust the cert + populate the DriverStore only when the package isn't
-    // already installed — on a re-Enable (after Disable) the driver is still
-    // there and only the devnode needs recreating, so skip the certutil/pnputil
-    // spawns entirely.
-    if !install::package_installed("hidmaestro.inf") {
-        install::install_driver(cert_path, inf_path)?;
-    }
+    // Version-aware: a re-add on the SAME version skips the certutil/pnputil
+    // spawns entirely, while an older package left by a previous NOBD release is
+    // deleted and replaced. The old `if !package_installed(...)` test saw any
+    // version as "already installed" and silently kept running the old driver.
+    install::ensure_driver(cert_path, inf_path, "hidmaestro.inf")?;
     // Migrate off the old shared 1209:4E42 identity (see PID history above).
     let _ = device::remove_devices(NOBD_VID, LEGACY_PID);
     oem::clear_oem_name(NOBD_VID, LEGACY_PID);
@@ -69,10 +67,8 @@ pub fn setup_hid(cert_path: &str, inf_path: &str) -> io::Result<String> {
 /// One-time elevated setup for XInput mode: install the vendored XUSB companion
 /// driver, write its config, and create the companion devnode (Xbox 360 id).
 pub fn setup_xinput(cert_path: &str, xusb_inf_path: &str) -> io::Result<String> {
-    // Skip the cert-trust + DriverStore install when already present (see setup_hid).
-    if !install::package_installed("hidmaestro_xusb.inf") {
-        install::install_driver(cert_path, xusb_inf_path)?;
-    }
+    // Version-aware (see setup_hid).
+    install::ensure_driver(cert_path, xusb_inf_path, "hidmaestro_xusb.inf")?;
     // Mutually exclusive with HID mode: remove the branded HID pad + its OEM
     // branding so the XUSB companion is the ONLY virtual NOBD device — and (with
     // a non-XInput physical stick) the only XInput pad a game like MvC2 sees.

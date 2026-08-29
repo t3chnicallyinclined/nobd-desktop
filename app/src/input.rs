@@ -524,19 +524,6 @@ impl GamepadInput {
         result
     }
 
-    /// Currently-connected controllers as (slot index, name).
-    pub fn controllers(&self) -> Vec<(usize, String)> {
-        self.connected
-            .iter()
-            .enumerate()
-            .filter(|(_, &c)| c)
-            .map(|(i, _)| {
-                let name = self.names.get(i).filter(|n| !n.is_empty()).cloned();
-                (i, name.unwrap_or_else(|| format!("Controller {}", i + 1)))
-            })
-            .collect()
-    }
-
     /// Measured device report rate in Hz (None until a few reports arrive).
     pub fn report_rate_hz(&self) -> Option<f64> {
         if self.report_interval_ms > 0.0 {

@@ -19,7 +19,7 @@ use windows_sys::Win32::System::Memory::{
 
 // Bumped from the single-player layout ("NOBD") — the per-player stats array
 // changed the struct offsets, so a stale mapping from an older build is re-init'd.
-const MAGIC: u32 = 0x4E_42_44_33; // "NBD3" — window_ms became per-player
+const MAGIC: u32 = 0x4E_42_44_34; // "NBD4" — raw-gap + risk fields changed the layout
 
 /// Number of player slots with their own sync window + stats.
 pub const NUM_PLAYERS: usize = 2;
@@ -41,8 +41,12 @@ pub struct PlayerStats {
     pub gap_sum_us: AtomicU64,
     pub gap_max_us: AtomicU64,
     pub gap_count: AtomicU64,
-    // provable frame-boundary saves (a group that crossed a frame)
-    pub saves: AtomicU64,
+    // Expected number of grouped chords a free-running 60 Hz poll WOULD have
+    // split, accumulated in parts-per-million of a chord. Deliberately a sum of
+    // probabilities (gap/16.667) and not a count of simulated coin flips: our
+    // clock has no relationship to the game's poll phase, so any single verdict
+    // is a draw, while the sum is an unbiased estimate.
+    pub risk_sum_ppm: AtomicU64,
     // game frame time (µs) from this controller's read cadence
     pub frame_us: AtomicU64,
     // game-perceived input latency (µs): physical press → first game read
@@ -51,7 +55,17 @@ pub struct PlayerStats {
     pub gp_lat_max_us: AtomicU64,
     // deliveries that actually waited a frame
     pub frame_waits: AtomicU64,
-    // passive monitor (sync OFF): gapped attempts + splits the game made
+    // RAW finger gap, measured off the input stream before the window touches
+    // it. Distinct from gap_* above, which can only ever see chords the window
+    // succeeded in grouping and is therefore censored at the window width -
+    // useless for "your window is too tight, widen it".
+    pub raw_gap_sum_us: AtomicU64,
+    pub raw_gap_count: AtomicU64,
+    pub raw_gap_max_us: AtomicU64,
+    // Chords the player actually ATTEMPTED (2+ attacks pressed in one raw
+    // press-to-all-released span), whether or not the window grouped them. The
+    // denominator that lets a UI tell "nothing pressed yet" from "every chord is
+    // splitting because the window is too tight".
     pub attempts: AtomicU64,
     pub misses: AtomicU64,
 }
@@ -61,8 +75,9 @@ impl PlayerStats {
         for a in [
             &self.groups, &self.singles, &self.lat_last_us, &self.lat_max_us,
             &self.lat_sum_us, &self.lat_count, &self.gap_sum_us, &self.gap_max_us,
-            &self.gap_count, &self.saves, &self.frame_us, &self.gp_lat_sum_us,
+            &self.gap_count, &self.risk_sum_ppm, &self.frame_us, &self.gp_lat_sum_us,
             &self.gp_lat_count, &self.gp_lat_max_us, &self.frame_waits,
+            &self.raw_gap_sum_us, &self.raw_gap_count, &self.raw_gap_max_us,
             &self.attempts, &self.misses,
         ] {
             a.store(0, Ordering::Relaxed);
@@ -94,9 +109,28 @@ impl PlayerStats {
         (avg, self.gap_max_us.load(Ordering::Relaxed) as f64 / 1000.0)
     }
 
-    /// Smallest window that still catches dashes: ceil(max gap)+1, clamped 3..=16.
+    /// (avg_ms, max_ms) of the RAW finger gap - every chord the player attempted,
+    /// including the ones the window failed to group. This is the number to show
+    /// as "your finger gap" and the only one a recommendation can be built from.
+    pub fn raw_finger_gap_ms(&self) -> (f64, f64) {
+        let n = self.raw_gap_count.load(Ordering::Relaxed);
+        if n == 0 { return (0.0, 0.0); }
+        let avg = self.raw_gap_sum_us.load(Ordering::Relaxed) as f64 / n as f64 / 1000.0;
+        (avg, self.raw_gap_max_us.load(Ordering::Relaxed) as f64 / 1000.0)
+    }
+
+    /// Expected number of grouped chords that would have split without NOBD.
+    /// A fractional expectation, not a count of events we claim to have seen.
+    pub fn expected_splits_saved(&self) -> f64 {
+        self.risk_sum_ppm.load(Ordering::Relaxed) as f64 / 1_000_000.0
+    }
+
+    /// Smallest window that still catches the player's chords: ceil(worst raw
+    /// gap)+1, clamped 3..=16. Built on the RAW gap, so it can recommend a
+    /// WIDER window than the one currently set - which the grouped-only gap,
+    /// censored at the current window, can never do.
     pub fn recommended_window_ms(&self) -> u32 {
-        let (_avg, max) = self.finger_gap_ms();
+        let (_avg, max) = self.raw_finger_gap_ms();
         if max <= 0.0 { return 0; }
         (max.ceil() as u32 + 1).clamp(3, 16)
     }

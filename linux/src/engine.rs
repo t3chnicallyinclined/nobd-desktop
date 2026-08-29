@@ -326,7 +326,7 @@ impl Engine {
             let window_us = cfg.window_ms[0].load(Ordering::Relaxed).clamp(0, 16) * 1000;
 
             // ---- decide how to wait -------------------------------------
-            let deadline = sync.pending_until(window_us);
+            let deadline = sync.next_deadline_us(window_us);
             let now = now_us();
             let spinning = match (deadline, self.settings.spin_us) {
                 (Some(d), s) if s > 0 => d.saturating_sub(now) <= s,
@@ -447,7 +447,7 @@ impl Engine {
             // the same call the Windows poll loop makes, but at the edge.
             if timer_fired || spinning || count > 0 {
                 let now = now_us();
-                if let Some(d) = sync.pending_until(window_us) {
+                if let Some(d) = sync.next_deadline_us(window_us) {
                     if now >= d {
                         let st = source.state();
                         let grouped = sync.process(

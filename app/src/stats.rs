@@ -32,17 +32,23 @@ struct Sample {
     gap_ms: f64,
     is_solo: bool,
     sig: String,
-    /// First-press time (ms since session epoch) for the game-frame simulation.
-    t0_ms: f64,
 }
 
-/// Would these two presses straddle a 60 fps game-poll boundary? Uses a
-/// FREE-RUNNING clock (`floor(t / period)`), never reset on input, so the press
-/// phase is random relative to the game's poll — exactly like a real game.
-/// `true` = the game reads the two buttons on different frames (a dropped chord).
-pub fn game_frame_split(t0_ms: f64, gap_ms: f64) -> bool {
-    let p = FRAME_MS;
-    (t0_ms / p).floor() != ((t0_ms + gap_ms) / p).floor()
+/// The chance a free-running 60 Hz poll lands between two presses `gap_ms`
+/// apart: `gap / 16.667`, capped at 1.
+///
+/// This replaced a `game_frame_split(t0, gap) -> bool` that compared
+/// `floor(t0/16.667)` against `floor((t0+gap)/16.667)`. `t0` came from our own
+/// session epoch, which has no relationship to a game's poll phase, so that was
+/// a Bernoulli draw at an arbitrary phase dressed up as a verdict - two
+/// identical 2.1 ms gaps would legitimately render "SPLIT" and "1 frame" on
+/// adjacent rows. There is no correction that makes a per-chord verdict a
+/// measurement; the odds are the only honest per-chord statement.
+///
+/// Note the two ends are NOT probabilistic: 0 ms can never split, and anything
+/// at or past a full frame always does.
+pub fn split_risk(gap_ms: f64) -> f64 {
+    (gap_ms / FRAME_MS).clamp(0.0, 1.0)
 }
 
 /// A rolling window of the most recent inputs. Everything — the verdict, the
@@ -86,9 +92,10 @@ impl GapStats {
         }
     }
 
-    /// Record a detected chord: its spread gap, the buttons, and the first-press
-    /// time (ms since session epoch) for the game-frame simulation.
-    pub fn record_chord(&mut self, gap_ms: f64, buttons: &[Button], t0_ms: f64) {
+    /// Record a detected chord: its spread gap and the buttons. (The first-press
+    /// timestamp used to be kept here to simulate a game's poll clock; that
+    /// simulation is gone - see `split_risk`.)
+    pub fn record_chord(&mut self, gap_ms: f64, buttons: &[Button], _t0_ms: f64) {
         let mut names: Vec<String> = buttons.iter().map(|b| format!("{:?}", b)).collect();
         names.sort();
         names.dedup();
@@ -96,7 +103,6 @@ impl GapStats {
             gap_ms,
             is_solo: false,
             sig: names.join("+"),
-            t0_ms,
         });
         self.trim();
     }
@@ -107,7 +113,6 @@ impl GapStats {
             gap_ms: 0.0,
             is_solo: true,
             sig: String::new(),
-            t0_ms: 0.0,
         });
         self.trim();
     }
@@ -148,21 +153,13 @@ impl GapStats {
         g.iter().sum::<f64>() / g.len() as f64
     }
 
-    fn sorted(&self) -> Vec<f64> {
-        let mut s = self.gaps();
-        s.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        s
-    }
-
-    /// p-th percentile of the gaps (p in 0.0..=1.0), nearest-rank.
-    pub fn percentile(&self, p: f64) -> f64 {
-        let s = self.sorted();
-        if s.is_empty() {
-            return 0.0;
-        }
-        let idx = (((s.len() - 1) as f64) * p).round() as usize;
-        s[idx.min(s.len() - 1)]
-    }
+    // `sorted`/`percentile`/`recommended_nobd` lived here. `recommended_nobd`
+    // was documented as "p95 + 1 ms, catches ~95% of your dashes", but its
+    // nearest-rank index `round((n-1) * 0.95)` IS the maximum for any decision
+    // window of 11 or fewer (and the 2nd largest at the default 12) - a
+    // percentile the sample could never support. The recommendation now comes
+    // from `PlayerStats::recommended_window_ms`, off the raw gap the sync loop
+    // measures, which also works on sources gilrs cannot see at all.
 
     pub fn min(&self) -> f64 {
         self.gaps().iter().cloned().fold(f64::INFINITY, f64::min)
@@ -170,16 +167,6 @@ impl GapStats {
 
     pub fn max(&self) -> f64 {
         self.gaps().iter().cloned().fold(0.0f64, f64::max)
-    }
-
-    /// Recommended NOBD window: covers your worst realistic attempt (p95) + 1 ms
-    /// headroom, clamped to 3..=16 ms. p95 (not the average) so it catches ~95%
-    /// of your dashes.
-    pub fn recommended_nobd(&self) -> u32 {
-        if self.count() == 0 {
-            return 0;
-        }
-        (self.percentile(0.95).ceil() as u32 + 1).clamp(3, 16)
     }
 
     /// Expected drop rate WITHOUT NOBD (0..1): for each pair the chance a frame
@@ -190,31 +177,27 @@ impl GapStats {
         if g.is_empty() {
             return 0.0;
         }
-        let sum: f64 = g.iter().map(|&x| (x / FRAME_MS).min(1.0)).sum();
+        let sum: f64 = g.iter().map(|&x| split_risk(x)).sum();
         sum / g.len() as f64
     }
 
-    /// How many chords in the window WOULD HAVE split across a 60 fps game-poll
-    /// boundary, simulated against the free-running clock with each chord's real
-    /// phase. This is the realized (not expected) count — what a 60 fps game
-    /// would actually have dropped.
-    pub fn simulated_split_count(&self) -> usize {
-        self.samples
+    /// Expected split rate WITH a NOBD window of `window_ms`.
+    ///
+    /// Chords inside the window are delivered in ONE output word, so the game
+    /// cannot see them on different frames at any phase - their risk is exactly
+    /// zero, not merely "not counted". Chords wider than the window keep their
+    /// original gap (NOBD shifts an edge, it never widens one), so their risk is
+    /// unchanged - NOBD never makes a too-wide chord worse.
+    pub fn split_probability_with_window(&self, window_ms: f64) -> f64 {
+        let g = self.gaps();
+        if g.is_empty() {
+            return 0.0;
+        }
+        let sum: f64 = g
             .iter()
-            .filter(|s| !s.is_solo && game_frame_split(s.t0_ms, s.gap_ms))
-            .count()
-    }
-
-    /// WITH NOBD (sync window `window_ms`): NOBD groups any chord whose gap is
-    /// within the window onto the same frame, so only chords with gap > window
-    /// remain ungrouped and can still split. This is the synced-side simulation.
-    pub fn synced_split_count(&self, window_ms: f64) -> usize {
-        self.samples
-            .iter()
-            .filter(|s| {
-                !s.is_solo && s.gap_ms > window_ms && game_frame_split(s.t0_ms, s.gap_ms)
-            })
-            .count()
+            .map(|&x| if x <= window_ms { 0.0 } else { split_risk(x) })
+            .sum();
+        sum / g.len() as f64
     }
 
     /// How many chords NOBD grouped onto the same frame (gap within the window).
@@ -286,6 +269,15 @@ impl GapStats {
         self.first_real_frame().map(|k| k as f64 * self.frame_ms)
     }
 
+    /// True when the input source reports too slowly to say anything about
+    /// grouping: if reports arrive every ~4 ms+, every gap under that already
+    /// looks simultaneous, so a high same-report rate is an artifact of the
+    /// sampling and not evidence of a sync window. Steam Input resampling to
+    /// 125 Hz is the common cause.
+    pub fn source_too_slow(&self) -> bool {
+        self.frame_ms >= 4.0
+    }
+
     /// Chords required in the window before a verdict locks in.
     fn required(&self) -> usize {
         self.window.min(MIN_SAMPLES)
@@ -314,22 +306,19 @@ impl GapStats {
             return Some(Grouping::AlwaysOn);
         }
 
-        // Signature B: a dead zone (grouped within a window, real gaps beyond it),
-        // OR singles still pass through, OR a solid same-frame majority → a window.
-        if dz >= 1 || self.solo_count() > 0 || sf >= 30.0 {
+        // Signature B: a dead zone (grouped within a window, real gaps beyond it)
+        // or a solid same-report majority → a window.
+        //
+        // `self.solo_count() > 0` used to be an alternative here, which forced
+        // "GROUPING DETECTED" the moment a player pressed any single attack
+        // button on its own. That is ordinary play and carries no grouping
+        // information whatsoever.
+        if dz >= 1 || sf >= 30.0 {
             return Some(Grouping::Window);
         }
 
         // Some same-frame pairs but no clear signature — fast hands or light noise.
         Some(Grouping::Hint)
-    }
-
-    /// True when a grouping/buffering firmware looks active (Window or AlwaysOn).
-    pub fn grouping_active(&self) -> bool {
-        matches!(
-            self.grouping(),
-            Some(Grouping::Window) | Some(Grouping::AlwaysOn)
-        )
     }
 
     /// How many more chords until a verdict locks in (0 = ready).

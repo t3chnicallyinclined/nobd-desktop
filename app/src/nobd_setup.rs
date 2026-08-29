@@ -52,6 +52,35 @@ pub fn device_present() -> bool {
     hm_native::is_present()
 }
 
+/// Whether the driver package for `mode` is already in the DriverStore. When it
+/// is, re-adding the device is just a devnode create - no cert import, no
+/// pnputil - so the UI must not call that an "install".
+pub fn driver_installed(mode: PadType) -> bool {
+    hm_native::install::package_installed(inf_name(mode))
+}
+
+/// True when the DriverStore holds a NOBD driver for `mode` at a DIFFERENT
+/// version from the one we ship — i.e. this machine is running a previous
+/// release's driver.
+///
+/// This exists because setup is only offered when no controller is present, so
+/// a user who already has a working NOBD Controller could never reach
+/// `ensure_driver` and kept the old driver forever while the app reported
+/// everything was fine. Spawns pnputil: call it once and cache the answer.
+pub fn driver_stale(mode: PadType) -> bool {
+    let inf = driver_dir().join(inf_name(mode));
+    let Some(want) = hm_native::install::inf_driver_ver(&inf.to_string_lossy()) else {
+        return false; // cannot tell - never nag
+    };
+    let name = inf_name(mode);
+    let pkgs = hm_native::install::enum_packages(name.trim_end_matches(".inf"));
+    let mine: Vec<_> = pkgs
+        .iter()
+        .filter(|p| p.original.eq_ignore_ascii_case(name))
+        .collect();
+    !mine.is_empty() && !mine.iter().any(|p| p.version == want)
+}
+
 /// One-time setup (must be elevated): install the vendored driver for `mode`,
 /// create + brand the NOBD device, then register the auto-elevate login task.
 /// Logs its outcome to `TEMP\nobd-setup.log` (the GUI path swallowed errors, so
@@ -83,7 +112,11 @@ fn run_setup_inner(mode: PadType) -> io::Result<()> {
         PadType::Hid => hm_native::setup_hid(&cer, &inf)?,
         PadType::Xinput => hm_native::setup_xinput(&cer, &inf)?,
     };
-    let _ = register_login_task(); // best-effort — setup still succeeds without it
+    // Deliberately does NOT register the logon task. Setup used to create an
+    // elevated ONLOGON scheduled task as a silent side effect of the user
+    // clicking one button; the "Start with Windows" checkbox then rendered
+    // pre-ticked as if they had asked for it. The checkbox is now the only thing
+    // that creates it.
     Ok(())
 }
 
@@ -143,7 +176,8 @@ pub fn register_login_task() -> io::Result<()> {
             "/RL",
             "HIGHEST",
             "/TR",
-            &format!("\"{}\"", exe.display()),
+            // `--tray` keeps the logon launch hidden; a manual launch shows the window.
+            &format!("\"{}\" --tray", exe.display()),
             "/F",
         ])
         .creation_flags(CREATE_NO_WINDOW)

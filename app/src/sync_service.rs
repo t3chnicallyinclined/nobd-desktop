@@ -21,6 +21,32 @@ use windows_sys::Win32::UI::Input::XboxController::XINPUT_STATE;
 const ATTACK_MASK: u16 = 0xF300;
 const NO_SLOT: u32 = u32::MAX;
 
+/// One 60 Hz frame. A raw press group that has been open longer than this is not
+/// a chord attempt any more - it is a held button - so the telemetry closes it.
+const GROUP_MAX_US: u64 = 16_667;
+
+/// The pad mode of the most recently started sync loop, so an exit path that
+/// does not own the controller (the tray's Quit) can still release it.
+/// `u32::MAX` = no loop has run this session.
+static LAST_PAD: AtomicU32 = AtomicU32::new(u32::MAX);
+
+/// Drive the virtual pad back to neutral: all buttons up, sticks centred.
+///
+/// The devnode outlives the app (LIFETIME_PARENT_PRESENT) and the driver keeps
+/// publishing whatever is in the shared section, so quitting mid-press left the
+/// NOBD Controller holding that button - or a direction - in every game, forever,
+/// until the app was run again. Best-effort by design: if we cannot open it there
+/// is nothing to release.
+pub fn release_pad() {
+    let raw = LAST_PAD.load(Ordering::Relaxed);
+    if raw == u32::MAX {
+        return;
+    }
+    if let Ok(mut c) = hm_native::NobdController::open(PadType::from_u32(raw).mode()) {
+        c.submit(0, 0, 0, 0, 0, 0, 0);
+    }
+}
+
 /// error codes for `SyncStatus::error`
 pub const ERR_NONE: u8 = 0;
 pub const ERR_NO_XINPUT: u8 = 1;
@@ -127,6 +153,10 @@ pub struct SyncStatus {
     /// NOBD Bulk stream rate (payloads/sec) in Extreme Low Latency mode; 0 = not in bulk mode. This is
     /// the stick->app freshness: at this rate the input is at most ~1/rate old when the app reads it.
     pub bulk_rate_hz: AtomicU32,
+    /// A sync window is open RIGHT NOW (a press is being held back). Drives the
+    /// live pulse in the UI — the one signal that proves the window is running
+    /// without needing a second controller to read our own output back.
+    pub window_open: AtomicBool,
 }
 
 impl SyncStatus {
@@ -141,7 +171,128 @@ impl SyncStatus {
             lat_avg: AtomicU32::new(0),
             lat_max: AtomicU32::new(0),
             bulk_rate_hz: AtomicU32::new(0),
+            window_open: AtomicBool::new(false),
         }
+    }
+}
+
+/// Live proof that the window is doing something, measured INSIDE the sync loop
+/// and published to the shared state.
+///
+/// This exists because the alternative — reading our own virtual pad back
+/// through XInput and fingerprinting its slot — only ever worked on the XInput
+/// source, so on a DirectInput stick or the NOBD Bulk stream the UI had no way
+/// to tell whether sync was doing anything at all. Measuring here works on every
+/// source, needs no second controller, and reports what the game actually got.
+struct SyncTelemetry {
+    prev_raw: u16,
+    prev_out: u16,
+    /// Raw press time of the first attack of the group currently forming.
+    first_press_us: u64,
+    /// Raw press time of the most recent attack press.
+    last_press_us: u64,
+    /// Attack bits pressed raw during the group currently forming. Lets us count
+    /// chord ATTEMPTS, not just successes - the difference between "nothing is
+    /// happening" and "your window is tighter than your finger gap".
+    raw_group: u16,
+    tracking: bool,
+}
+
+impl SyncTelemetry {
+    fn new() -> Self {
+        nobd_shared::state().reset_stats(); // per-session counters
+        Self {
+            prev_raw: 0,
+            prev_out: 0,
+            first_press_us: 0,
+            last_press_us: 0,
+            raw_group: 0,
+            tracking: false,
+        }
+    }
+
+    /// Feed one tick: the raw buttons in, the grouped buttons out, the delay the
+    /// window actually applied, and whether a window is open. Call after
+    /// `SyncWindow::process`.
+    fn observe(
+        &mut self,
+        raw: u16,
+        out: u16,
+        now_us: u64,
+        window_open: bool,
+        delay_us: u32,
+        status: &SyncStatus,
+    ) {
+        let p = &nobd_shared::state().players[0];
+
+        // Close a finished raw group: every attack released, OR it has been open
+        // longer than one frame. The frame cap is load-bearing - without it a
+        // HELD button anchors `first_press_us` indefinitely, so holding LP and
+        // pressing HP a second later reported a 1000 ms finger gap and pinned
+        // the session maximum there via fetch_max.
+        if self.tracking
+            && (raw & ATTACK_MASK == 0
+                || now_us.saturating_sub(self.first_press_us) >= GROUP_MAX_US)
+        {
+            if self.raw_group.count_ones() >= 2 {
+                // A chord the player attempted, whether or not the window
+                // grouped it - so the UI can tell "nothing pressed yet" from
+                // "your window is too tight and every chord is splitting".
+                p.attempts.fetch_add(1, Ordering::Relaxed);
+                let g = self.last_press_us.saturating_sub(self.first_press_us);
+                p.raw_gap_sum_us.fetch_add(g, Ordering::Relaxed);
+                p.raw_gap_count.fetch_add(1, Ordering::Relaxed);
+                p.raw_gap_max_us.fetch_max(g, Ordering::Relaxed);
+            }
+            self.tracking = false;
+            self.raw_group = 0;
+        }
+
+        let pressed = raw & !self.prev_raw & ATTACK_MASK;
+        if pressed != 0 {
+            if !self.tracking {
+                self.first_press_us = now_us;
+                self.raw_group = 0;
+                self.tracking = true;
+            }
+            self.last_press_us = now_us;
+            self.raw_group |= pressed;
+        }
+
+        // Output attack press edges are commits the game actually sees.
+        let committed = out & !self.prev_out & ATTACK_MASK;
+        if committed != 0 {
+            if committed.count_ones() >= 2 {
+                p.groups.fetch_add(1, Ordering::Relaxed);
+                // Spread of the presses that were grouped. Bounded by the window
+                // by construction, so this is NOT the finger gap - raw_gap_* is.
+                let gap_us = self.last_press_us.saturating_sub(self.first_press_us);
+                p.gap_sum_us.fetch_add(gap_us, Ordering::Relaxed);
+                p.gap_count.fetch_add(1, Ordering::Relaxed);
+                p.gap_max_us.fetch_max(gap_us, Ordering::Relaxed);
+                // Accumulate the PROBABILITY a free-running 60 Hz poll would have
+                // split this pair, not a simulated coin flip: our clock has no
+                // relationship to the game's phase, so a per-chord verdict is a
+                // draw while the running sum is an unbiased estimate.
+                let risk = (gap_us as f64 / 1000.0 / crate::stats::FRAME_MS).min(1.0);
+                p.risk_sum_ppm
+                    .fetch_add((risk * 1_000_000.0) as u64, Ordering::Relaxed);
+            } else {
+                p.singles.fetch_add(1, Ordering::Relaxed);
+            }
+            // The delay the window really applied, straight from SyncWindow.
+            // Measuring it as `now - first_press` instead reported the time since
+            // the player first touched ANY attack, which is unbounded.
+            let d = delay_us as u64;
+            p.lat_last_us.store(d, Ordering::Relaxed);
+            p.lat_sum_us.fetch_add(d, Ordering::Relaxed);
+            p.lat_count.fetch_add(1, Ordering::Relaxed);
+            p.lat_max_us.fetch_max(d, Ordering::Relaxed);
+        }
+
+        status.window_open.store(window_open, Ordering::Relaxed);
+        self.prev_raw = raw;
+        self.prev_out = out;
     }
 }
 
@@ -200,6 +351,11 @@ impl SyncService {
         self.status.bulk_rate_hz.load(Ordering::Relaxed)
     }
 
+    /// A sync window is open right now — a press is being held back this instant.
+    pub fn window_open(&self) -> bool {
+        self.status.window_open.load(Ordering::Relaxed)
+    }
+
     pub fn real_slot(&self) -> Option<u32> {
         let s = self.status.real_slot.load(Ordering::Relaxed);
         if s == NO_SLOT {
@@ -233,7 +389,51 @@ impl Drop for SyncService {
     }
 }
 
+/// Identify OUR companion's XInput slot by FINGERPRINTING it. XInput exposes no
+/// device identity, so we drive a unique button marker onto the companion and
+/// find the slot reporting exactly that — definitively our own output. Without
+/// it we can't tell the companion from the real pad, which causes feedback (sync
+/// reading its own output) and a phantom pad in the tester.
+///
+/// Runs on EVERY source, not just the XInput one. It used to be inline in
+/// `run_xinput`, so on a DirectInput stick or the NOBD Bulk stream the tester
+/// never learned which slot was ours — it then labelled our own synced output
+/// "your stick" and could never show the synced side at all.
+fn fingerprint_companion(
+    xi: XInputGetStateFn,
+    ctrl: &mut hm_native::NobdController,
+    stop: &AtomicBool,
+    status: &SyncStatus,
+) -> Option<u32> {
+    const MARKER: u16 = 0x0330; // LB|RB|Back|Start — an unlikely-to-be-held combo
+    // Hold the marker and watch for the slot that reflects it. The companion's
+    // UMDF driver can take up to ~500ms to (re)attach to the freshly-created
+    // shared section, so give it up to ~2s. Require TWO consecutive matches on
+    // the same slot so a real pad transiently holding those buttons can't be
+    // mistaken for our output.
+    let mut prev: Option<u32> = None;
+    let mut found: Option<u32> = None;
+    for _ in 0..200 {
+        if stop.load(Ordering::Relaxed) {
+            return None;
+        }
+        ctrl.submit(MARKER, 0, 0, 0, 0, 0, 0);
+        std::thread::sleep(Duration::from_millis(10));
+        let hit =
+            (0..4).find(|&s| xinput_state(xi, s).map_or(false, |st| st.Gamepad.wButtons == MARKER));
+        if hit.is_some() && hit == prev {
+            found = hit;
+            status.virtual_slot.store(hit.unwrap(), Ordering::Relaxed);
+            break;
+        }
+        prev = hit;
+    }
+    ctrl.submit(0, 0, 0, 0, 0, 0, 0); // release the marker
+    found
+}
+
 fn run(stop: Arc<AtomicBool>, status: Arc<SyncStatus>, pad: PadType, source: SyncSource) {
+    LAST_PAD.store(pad.as_u32(), Ordering::Relaxed);
     match source {
         SyncSource::XInput => run_xinput(stop, status, pad),
         SyncSource::Hid(id) => run_hid(stop, status, pad, id),
@@ -257,12 +457,20 @@ fn run_bulk(stop: Arc<AtomicBool>, status: Arc<SyncStatus>, pad: PadType) {
             return;
         }
     };
+    // Tell the tester which XInput slot is our own output (see fingerprint_companion).
+    if pad == PadType::Xinput {
+        if let Some(xi) = load_xinput() {
+            fingerprint_companion(xi, &mut ctrl, &stop, &status);
+        }
+    }
+
     unsafe { timeBeginPeriod(1) };
     status.active.store(true, Ordering::Relaxed);
     status.error.store(ERR_NONE, Ordering::Relaxed);
 
     let epoch = Instant::now();
     let mut sync = SyncWindow::new();
+    let mut tel = SyncTelemetry::new();
     while !stop.load(Ordering::Relaxed) {
         let now_us = epoch.elapsed().as_micros() as u64;
         let s = nobd_shared::state();
@@ -274,12 +482,14 @@ fn run_bulk(stop: Arc<AtomicBool>, status: Arc<SyncStatus>, pad: PadType) {
             let (buttons, lt, rt, lx, ly, rx, ry) = snap.get();
             let grouped = sync.process(buttons, ATTACK_MASK, ATTACK_MASK, now_us, window_us, enabled);
             ctrl.submit(grouped, lt, rt, lx, ly, rx, ry);
+            tel.observe(buttons, grouped, now_us, sync.pending_since().is_some(), sync.last_commit_delay_us(), &status);
         } else {
             status.real_present.store(false, Ordering::Relaxed);
         }
         status.bulk_rate_hz.store(snap.rate_hz(), Ordering::Relaxed);
         std::thread::sleep(Duration::from_micros(250)); // ~4 kHz submit; the source is already ~10 kHz fresh
     }
+    ctrl.submit(0, 0, 0, 0, 0, 0, 0); // never hand the game a stuck button
     status.active.store(false, Ordering::Relaxed);
     status.bulk_rate_hz.store(0, Ordering::Relaxed);
     snap.stop(); // signal the reader thread to exit
@@ -310,12 +520,20 @@ fn run_hid(
         }
     };
 
+    // Tell the tester which XInput slot is our own output (see fingerprint_companion).
+    if pad == PadType::Xinput {
+        if let Some(xi) = load_xinput() {
+            fingerprint_companion(xi, &mut ctrl, &stop, &status);
+        }
+    }
+
     unsafe { timeBeginPeriod(1) };
     status.active.store(true, Ordering::Relaxed);
     status.error.store(ERR_NONE, Ordering::Relaxed);
 
     let epoch = Instant::now();
     let mut sync = SyncWindow::new();
+    let mut tel = SyncTelemetry::new();
 
     while !stop.load(Ordering::Relaxed) {
         let now_us = epoch.elapsed().as_micros() as u64;
@@ -329,11 +547,13 @@ fn run_hid(
         // Right stick stays centered — a stick's directions come from the d-pad
         // (mirrored to the left stick by the reader).
         ctrl.submit(grouped, lt, rt, lx, ly, 0, 0);
+        tel.observe(buttons, grouped, now_us, sync.pending_since().is_some(), sync.last_commit_delay_us(), &status);
 
         std::thread::sleep(Duration::from_micros(1000)); // ~1 kHz
     }
 
     snap.stop();
+    ctrl.submit(0, 0, 0, 0, 0, 0, 0); // never hand the game a stuck button
     status.active.store(false, Ordering::Relaxed);
 }
 
@@ -354,36 +574,9 @@ fn run_xinput(stop: Arc<AtomicBool>, status: Arc<SyncStatus>, pad: PadType) {
         }
     };
 
-    // Identify OUR companion's XInput slot by FINGERPRINTING it. XInput exposes
-    // no device identity, so we drive a unique button marker onto the companion
-    // and find the slot reporting exactly that — definitively our own output.
-    // Without this we can't tell the companion from the real pad, which causes
-    // feedback (sync reading its own output) and a phantom pad in the tester.
     let mut companion_slot: Option<u32> = None;
     if pad == PadType::Xinput {
-        const MARKER: u16 = 0x0330; // LB|RB|Back|Start — an unlikely-to-be-held combo
-        // Hold the marker and watch for the slot that reflects it. The companion's
-        // UMDF driver can take up to ~500ms to (re)attach to the freshly-created
-        // shared section, so give it up to ~2s. Require TWO consecutive matches on
-        // the same slot so a real pad transiently holding those buttons can't be
-        // mistaken for our output.
-        let mut prev: Option<u32> = None;
-        for _ in 0..200 {
-            if stop.load(Ordering::Relaxed) {
-                return;
-            }
-            ctrl.submit(MARKER, 0, 0, 0, 0, 0, 0);
-            std::thread::sleep(Duration::from_millis(10));
-            let hit = (0..4)
-                .find(|&s| xinput_state(xi, s).map_or(false, |st| st.Gamepad.wButtons == MARKER));
-            if hit.is_some() && hit == prev {
-                companion_slot = hit;
-                status.virtual_slot.store(hit.unwrap(), Ordering::Relaxed);
-                break;
-            }
-            prev = hit;
-        }
-        ctrl.submit(0, 0, 0, 0, 0, 0, 0); // release the marker
+        companion_slot = fingerprint_companion(xi, &mut ctrl, &stop, &status);
     }
 
     // Track-B probe: measure the companion submit->readable latency ONCE. Write a unique LX marker,
@@ -447,6 +640,7 @@ fn run_xinput(stop: Arc<AtomicBool>, status: Arc<SyncStatus>, pad: PadType) {
 
     let epoch = Instant::now();
     let mut sync = SyncWindow::new();
+    let mut tel = SyncTelemetry::new();
 
     while !stop.load(Ordering::Relaxed) {
         let now_us = epoch.elapsed().as_micros() as u64;
@@ -468,6 +662,7 @@ fn run_xinput(stop: Arc<AtomicBool>, status: Arc<SyncStatus>, pad: PadType) {
                 gp.sThumbRX,
                 gp.sThumbRY,
             );
+            tel.observe(gp.wButtons, grouped, now_us, sync.pending_since().is_some(), sync.last_commit_delay_us(), &status);
         } else {
             status.real_present.store(false, Ordering::Relaxed);
         }
@@ -475,5 +670,90 @@ fn run_xinput(stop: Arc<AtomicBool>, status: Arc<SyncStatus>, pad: PadType) {
         std::thread::sleep(Duration::from_micros(1000)); // ~1 kHz
     }
 
+    ctrl.submit(0, 0, 0, 0, 0, 0, 0); // never hand the game a stuck button
     status.active.store(false, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+mod telemetry_tests {
+    use super::*;
+
+    const A: u16 = 0x1000; // XInput A
+    const B: u16 = 0x2000; // XInput B
+
+    /// One test, not several: `observe` writes to the process-global shared
+    /// state, so parallel tests would race each other.
+    #[test]
+    fn raw_gap_survives_a_held_button_and_measures_a_real_chord() {
+        let status = SyncStatus::new();
+        let p = &nobd_shared::state().players[0];
+
+        // --- 1. hold A for a full second, then press B ---------------------
+        // The bug: `tracking` only reset when EVERY attack released, so
+        // first_press_us stayed anchored at the A press and this reported a
+        // 1000 ms finger gap - pinned for the session by fetch_max.
+        let mut tel = SyncTelemetry::new(); // resets the counters
+        for ms in 0..1100u64 {
+            let raw = match ms {
+                0..=999 => A,
+                1000..=1049 => A | B,
+                _ => 0, // release, so the group actually closes and records
+            };
+            tel.observe(raw, 0, ms * 1000, false, 0, &status);
+        }
+        let (_, max) = p.raw_finger_gap_ms();
+        assert!(
+            max < 17.0,
+            "a held button inflated the finger gap to {max:.1} ms"
+        );
+
+        // --- 2. a real 3 ms chord, pressed and released --------------------
+        let mut tel = SyncTelemetry::new();
+        for ms in 0..40u64 {
+            let raw = match ms {
+                0..=2 => A,
+                3..=20 => A | B,
+                _ => 0,
+            };
+            tel.observe(raw, 0, ms * 1000, false, 0, &status);
+        }
+        let (avg, max) = p.raw_finger_gap_ms();
+        let attempts = p.attempts.load(Ordering::Relaxed);
+        assert_eq!(attempts, 1, "one chord attempt should have been counted");
+        assert!(
+            (avg - 3.0).abs() < 0.5 && (max - 3.0).abs() < 0.5,
+            "expected a ~3 ms finger gap, got avg {avg:.1} max {max:.1}"
+        );
+
+        // --- 3. a chord the window FAILS to group still counts as an attempt
+        // This is the signal that drives the "TOO TIGHT" diagnosis, so it must
+        // survive the window splitting the chord into two singles.
+        let mut tel = SyncTelemetry::new();
+        for ms in 0..40u64 {
+            let raw = match ms {
+                0..=7 => A,
+                8..=20 => A | B,
+                _ => 0,
+            };
+            // window too tight: A commits alone at 1 ms, B alone at 9 ms
+            let out = match ms {
+                0 => 0,
+                1..=8 => A,
+                _ => A | B,
+            };
+            tel.observe(raw, out, ms * 1000, false, 1_000, &status);
+        }
+        assert_eq!(
+            p.attempts.load(Ordering::Relaxed),
+            1,
+            "a split chord is still an attempt"
+        );
+        assert_eq!(p.groups.load(Ordering::Relaxed), 0, "nothing was grouped");
+        assert_eq!(p.singles.load(Ordering::Relaxed), 2, "two separate singles");
+        let (_, hold_max) = p.latency_ms();
+        assert!(
+            hold_max < 2.0,
+            "hold must be the window's own delay, got {hold_max:.1} ms"
+        );
+    }
 }

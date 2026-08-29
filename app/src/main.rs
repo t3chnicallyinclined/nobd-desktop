@@ -8,20 +8,78 @@ mod hidhide;
 mod input;
 mod logo;
 mod nobd_setup;
+mod palette;
 mod persist;
 mod stats;
 mod sync_service;
 mod tray;
 
-use egui::Color32;
-
 fn configure_style(ctx: &egui::Context) {
-    let mut visuals = egui::Visuals::dark();
-    visuals.panel_fill = Color32::from_rgb(18, 18, 24);
-    visuals.window_fill = Color32::from_rgb(18, 18, 24);
-    visuals.selection.bg_fill = Color32::from_rgb(0, 180, 216);
-    visuals.hyperlink_color = Color32::from_rgb(0, 180, 216);
-    ctx.set_visuals(visuals);
+    use palette::*;
+    // Pin the theme. `theme_preference` defaults to System, so on a machine set
+    // to light Windows egui kept swapping in its own light visuals and every
+    // panel background came back rgb(248,248,248) — only the explicit card fills
+    // stayed dark. The charter is a dark palette; it is not a system preference.
+    ctx.options_mut(|o| o.theme_preference = egui::ThemePreference::Dark);
+    let mut v = egui::Visuals::dark();
+    v.panel_fill = BASE;
+    v.window_fill = BASE;
+    v.extreme_bg_color = WELL;
+    v.faint_bg_color = SURFACE;
+    v.selection.bg_fill = ACTION;
+    v.hyperlink_color = ACTION;
+    v.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, HAIRLINE);
+    // Make the DIM voice the default, so an uncoloured label lands in prose ink
+    // and every promotion to full-strength INK is deliberate and greppable.
+    v.widgets.noninteractive.fg_stroke.color = INK_DIM;
+    ctx.set_visuals(v);
+}
+
+/// Already-running check. Without it the logon task plus a manual launch gives
+/// two tray icons and two sync loops submitting to the same virtual pad.
+/// Returns false if another instance owns the name (and was asked to show).
+fn claim_single_instance() -> bool {
+    use windows_sys::Win32::Foundation::{GetLastError, ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS};
+    use windows_sys::Win32::System::Threading::CreateMutexW;
+    // Raw string + explicit NUL: the name needs a literal backslash.
+    let name: Vec<u16> = r"Local\NobdDesktopSingleton"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    unsafe {
+        let h = CreateMutexW(std::ptr::null(), 1, name.as_ptr());
+        if h == 0 {
+            // ACCESS_DENIED means the name exists at an integrity level we
+            // cannot write to — i.e. the logon task's elevated instance is
+            // already running and we are the medium-IL double-click. That is
+            // "already running", not "cannot tell"; treating it as the latter
+            // let a second instance start and fight over the same virtual pad.
+            let denied = GetLastError() == ERROR_ACCESS_DENIED;
+            if !denied {
+                return true; // genuinely cannot tell — don't block startup
+            }
+        }
+        if h == 0 || GetLastError() == ERROR_ALREADY_EXISTS {
+            // Hand the running instance the foreground instead of starting a second.
+            use windows_sys::Win32::UI::WindowsAndMessaging::{
+                FindWindowW, SetForegroundWindow, ShowWindow, SW_RESTORE, SW_SHOW,
+            };
+            let title: Vec<u16> = "NOBD Desktop"
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect();
+            let hwnd = FindWindowW(std::ptr::null(), title.as_ptr());
+            if hwnd != 0 {
+                ShowWindow(hwnd, SW_SHOW);
+                ShowWindow(hwnd, SW_RESTORE);
+                SetForegroundWindow(hwnd);
+            }
+            return false;
+        }
+        // The handle is intentionally never closed: the mutex must stay held for
+        // the life of the process, and the OS releases it when we exit.
+        true
+    }
 }
 
 fn main() -> eframe::Result {
@@ -34,6 +92,17 @@ fn main() -> eframe::Result {
         let path = std::env::temp_dir().join("nobd-panic.txt");
         let _ = std::fs::write(&path, msg);
     }));
+
+    // The elevated setup run is exempt from the singleton. It is spawned by
+    // `ShellExecuteW(runas)` from a parent that then exits, and nothing
+    // sequences the two: if the child claimed the mutex before the parent's
+    // handles closed it saw ERROR_ALREADY_EXISTS, returned early, and NOTHING
+    // WAS EVER INSTALLED — with no error anywhere. Setup is short-lived and
+    // idempotent; it does not need the guard.
+    let is_setup_run = std::env::args().any(|a| a.starts_with("--setup-"));
+    if !is_setup_run && !claim_single_instance() {
+        return Ok(());
+    }
 
     // Relaunched elevated for one-time NOBD Controller setup: install the driver
     // + create the device before the GUI comes up, then continue as the (now
@@ -76,8 +145,12 @@ fn main() -> eframe::Result {
                 width: 256,
                 height: 256,
             }))
-            // Start hidden — the app lives in the tray; left-click the icon to open.
-            .with_visible(std::env::var("NOBD_DEBUG_SHOW").is_ok()),
+            // Visible by default. Hiding is OPT-IN via `--tray`, which is what the
+            // logon task passes. It used to be the other way round: a first-timer
+            // double-clicking nobd.exe got no window at all, and the UAC relaunch
+            // (which exits and comes back through here) made the app vanish at the
+            // exact moment they clicked the one button on screen.
+            .with_visible(!std::env::args().any(|a| a == "--tray")),
         ..Default::default()
     };
 

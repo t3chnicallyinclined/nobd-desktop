@@ -9,3 +9,4 @@ out.txt
 #   gh release download v1.5.230.0 --repo nefarius/HidHide \
 #     --pattern "HidHide_1.5.230_x64.exe" --dir tools/hidhide
 tools/hidhide/*.exe
+artcheck/
