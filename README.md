@@ -64,15 +64,15 @@ The same window runs in three places from one implementation (`shared/src/sync_w
 
 ## Install / Use
 
-1. Download the latest release ZIP and unzip it. Keep `nobd.exe` and the `driver/` folder together.
-2. Run **`nobd.exe`** and click **Install NOBD Controller**. Windows asks for admin once — this adds a small signed driver and the virtual controller. The app tells you exactly what it installs before you click.
+1. Download **`NOBD-Desktop-Setup-x.y.z.exe`** and run it. (A portable ZIP is also attached if you prefer — keep `nobd.exe` and the `driver/` folder together.)
+2. Open NOBD and click **Install NOBD Controller**. Windows asks for admin once — this adds a small signed driver and the virtual controller. The app tells you exactly what it installs before you click.
 3. In your game's controller settings, select **"NOBD Controller (Xbox 360)"**. Nothing changes in-game until you do.
 
 That's it. The controller stays in Windows after a restart, so it keeps working without opening the app. Tick **Start with Windows** if you want the tray app back at login too.
 
 The app answers one question on its front screen: **are your dashes coming out?** Press two punches together and it tells you how many landed together, how far apart your fingers actually were, and how many would have split across a frame without it.
 
-**Removing it:** *Details → Remove NOBD Controller*. That takes the controller back out of Windows; the driver package and its signing certificate stay installed (there is no full uninstall yet).
+**Removing it:** uninstall *NOBD Desktop* from Add/Remove Programs. That removes everything it added — the controller, the driver package, the signing certificate, the logon task — and un-hides your stick. To drop just the virtual controller and keep NOBD installed, use *Details → Remove NOBD Controller*.
 
 ---
 

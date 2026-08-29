@@ -99,8 +99,17 @@ fn main() -> eframe::Result {
     // handles closed it saw ERROR_ALREADY_EXISTS, returned early, and NOTHING
     // WAS EVER INSTALLED — with no error anywhere. Setup is short-lived and
     // idempotent; it does not need the guard.
-    let is_setup_run = std::env::args().any(|a| a.starts_with("--setup-"));
+    let is_setup_run = std::env::args().any(|a| a.starts_with("--setup-") || a == "--uninstall");
     if !is_setup_run && !claim_single_instance() {
+        return Ok(());
+    }
+
+    // `--uninstall`: headless full removal, run by the NSIS uninstaller before it
+    // deletes the program files. Never opens a window.
+    if std::env::args().any(|a| a == "--uninstall") {
+        let report = nobd_setup::uninstall_everything();
+        let log = std::env::temp_dir().join("nobd-uninstall.log");
+        let _ = std::fs::write(&log, report);
         return Ok(());
     }
 

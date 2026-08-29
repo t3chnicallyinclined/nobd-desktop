@@ -130,6 +130,91 @@ pub fn eject() -> io::Result<u32> {
     Ok(hm_native::remove_all())
 }
 
+/// SHA-1 thumbprint of a DER certificate, via `certutil -hashfile`.
+///
+/// Shelled out rather than hashed in-process to avoid pulling a crypto crate in
+/// for one uninstall path. The label line is localized; the hash line is not, so
+/// we look for the 40 hex characters and ignore everything else.
+fn cert_thumbprint(cer_path: &std::path::Path) -> Option<String> {
+    let out = Command::new("certutil")
+        .args(["-hashfile", &cer_path.to_string_lossy(), "SHA1"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    text.lines()
+        .map(|l| l.replace(' ', ""))
+        .find(|l| l.len() == 40 && l.chars().all(|c| c.is_ascii_hexdigit()))
+}
+
+/// Remove EVERYTHING NOBD put on this machine. Elevated, headless — this is what
+/// the uninstaller runs before deleting the program files.
+///
+/// Order matters. HidHide is un-cloaked FIRST: if the files were deleted while a
+/// cloak was active, the user's stick would stay invisible in every game with
+/// nothing left on the machine to explain why or undo it.
+///
+/// Best-effort throughout — a missing piece is not a reason to abandon the rest —
+/// but every step is reported so the log says what actually happened.
+pub fn uninstall_everything() -> String {
+    let mut log = String::new();
+
+    // 1. Un-cloak the stick. FIRST, for the reason above.
+    let _ = crate::hidhide::cloak(false);
+    let ui = crate::persist::load_ui();
+    if !ui.hid_device.is_empty() {
+        let _ = crate::hidhide::unhide_device(&ui.hid_device);
+    }
+    log.push_str("hidhide: cloak cleared\n");
+
+    // 2. Hand the virtual pad back neutral before it disappears.
+    crate::sync_service::release_pad();
+
+    // 3. The devnodes.
+    let devs = if is_elevated() { hm_native::remove_all() } else { 0 };
+    log.push_str(&format!("devnodes removed: {devs}\n"));
+
+    // 4. The logon task.
+    match unregister_login_task() {
+        Ok(()) => log.push_str("logon task: removed\n"),
+        Err(e) => log.push_str(&format!("logon task: {e}\n")),
+    }
+
+    // 5. The driver packages — both of them. The needle is `hidmaestro`, because
+    //    `hidmaestro_xusb.inf` does not contain the string `hidmaestro.inf`.
+    let pkgs = hm_native::install::uninstall_hidmaestro();
+    log.push_str(&format!("driver packages removed: {pkgs}\n"));
+
+    // 6. The signing certificate, from both stores it was added to. Keyed on the
+    //    THUMBPRINT, never the subject name, so a near-name collision cannot take
+    //    out an unrelated certificate.
+    let cer = driver_dir().join("nobd-driver.cer");
+    match cert_thumbprint(&cer) {
+        Some(tp) => {
+            for store in ["Root", "TrustedPublisher"] {
+                let ok = Command::new("certutil")
+                    .args(["-delstore", store, &tp])
+                    .creation_flags(CREATE_NO_WINDOW)
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(false);
+                log.push_str(&format!("cert {store}: {}\n", if ok { "removed" } else { "not found" }));
+            }
+        }
+        None => log.push_str("cert: thumbprint unreadable, NOT removed\n"),
+    }
+
+    // 7. Settings.
+    if let Ok(base) = std::env::var("APPDATA") {
+        let dir = std::path::PathBuf::from(base).join("nobd-desktop");
+        match std::fs::remove_dir_all(&dir) {
+            Ok(()) => log.push_str("settings: removed\n"),
+            Err(_) => log.push_str("settings: none\n"),
+        }
+    }
+    log
+}
+
 /// Relaunch nobd.exe elevated with `--setup-<mode>` — this is what fires the UAC
 /// prompt. The non-elevated caller should exit afterward so the elevated instance
 /// takes over. `ShellExecuteW` returns an HINSTANCE > 32 on success; <= 32 means

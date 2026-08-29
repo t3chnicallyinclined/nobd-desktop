@@ -111,6 +111,20 @@ checks cover them.
   back white) and replaced glyphs the bundled font cannot draw — the arrows and
   status dots were rendering as empty boxes.
 
+### Packaging
+
+- **Ships as an installer** (`NOBD-Desktop-Setup-0.6.0.exe`) rather than a ZIP:
+  Program Files, Start Menu and desktop shortcuts, and an Add/Remove Programs
+  entry. The portable ZIP is still attached.
+- **A real uninstall.** Removing NOBD from Add/Remove Programs now runs
+  `nobd.exe --uninstall`, which un-cloaks your stick *first* (deleting the files
+  under an active cloak would leave it invisible in every game with nothing left
+  to undo it), releases the virtual pad, removes the devnodes, the logon task,
+  both driver packages, the signing certificate from Root and TrustedPublisher —
+  keyed on its thumbprint, never a subject name — and the saved settings.
+- The installer deliberately does **not** install the driver itself. That stays
+  in the app, behind its own disclosure of what it adds to the machine.
+
 ### Docs
 
 - The README documented a DLL-injection architecture that no longer exists —
