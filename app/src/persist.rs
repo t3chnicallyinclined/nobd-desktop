@@ -44,6 +44,13 @@ pub struct UiCfg {
     pub pad_type: u32,
     /// 1 = hide the physical stick from games via HidHide (HID source only).
     pub hide_stick: u32,
+    /// 1 = leave the NOBD Controller in Windows after NOBD closes.
+    ///
+    /// Defaults to 0. The devnode is created with LIFETIME_PARENT_PRESENT, so it
+    /// used to survive both the app closing AND a reboot unconditionally - which
+    /// left a phantom Xbox controller in Steam with the app shut and the stick
+    /// unplugged, indistinguishable from a real one and impossible to explain.
+    pub keep_controller: u32,
 }
 
 /// Load the UI-only settings (input source + HID device).
@@ -62,6 +69,7 @@ pub fn load_ui() -> UiCfg {
                     "hid_device" => ui.hid_device = v.to_string(),
                     "pad_type" => ui.pad_type = v.parse::<u32>().unwrap_or(0).min(1),
                     "hide_stick" => ui.hide_stick = v.parse::<u32>().unwrap_or(0).min(1),
+                    "keep_controller" => ui.keep_controller = v.parse::<u32>().unwrap_or(0).min(1),
                     _ => {}
                 }
             }
@@ -74,8 +82,8 @@ pub fn load_ui() -> UiCfg {
 pub fn save_ui(ui: &UiCfg) {
     if let Some(path) = ui_config_path() {
         let body = format!(
-            "input_source={}\nhid_device={}\npad_type={}\nhide_stick={}\n",
-            ui.input_source, ui.hid_device, ui.pad_type, ui.hide_stick,
+            "input_source={}\nhid_device={}\npad_type={}\nhide_stick={}\nkeep_controller={}\n",
+            ui.input_source, ui.hid_device, ui.pad_type, ui.hide_stick, ui.keep_controller,
         );
         if let Ok(mut f) = std::fs::File::create(&path) {
             let _ = f.write_all(body.as_bytes());

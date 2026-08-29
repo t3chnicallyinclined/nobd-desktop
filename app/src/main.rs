@@ -99,8 +99,16 @@ fn main() -> eframe::Result {
     // handles closed it saw ERROR_ALREADY_EXISTS, returned early, and NOTHING
     // WAS EVER INSTALLED — with no error anywhere. Setup is short-lived and
     // idempotent; it does not need the guard.
-    let is_setup_run = std::env::args().any(|a| a.starts_with("--setup-") || a == "--uninstall");
+    let is_setup_run = std::env::args().any(|a| a.starts_with("--setup-") || a == "--uninstall" || a == "--eject");
     if !is_setup_run && !claim_single_instance() {
+        return Ok(());
+    }
+
+    // `--eject`: headless removal of just the virtual controller, so the Remove
+    // button can elevate itself the same way Install does. Without this a
+    // non-elevated user could never remove the controller at all.
+    if std::env::args().any(|a| a == "--eject") {
+        let _ = nobd_setup::eject();
         return Ok(());
     }
 

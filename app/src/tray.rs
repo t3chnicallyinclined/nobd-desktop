@@ -71,7 +71,9 @@ pub fn spawn(ctx: egui::Context) -> Option<Tray> {
     let open = MenuItem::new("Open NOBD", true, None);
     // Same wording as the main screen's switch. It used to say "Sync enabled"
     // while the panel said "NOBD" and the button said "On", for one flag.
-    let enabled = CheckMenuItem::new("Grouping on", true, s0.enabled.load(Ordering::Relaxed) != 0, None);
+    // A BYPASS, not the master switch: it leaves the controller in place and
+    // passes presses through, so a running game does not lose its pad.
+    let enabled = CheckMenuItem::new("Syncing (uncheck to bypass)", true, s0.enabled.load(Ordering::Relaxed) != 0, None);
     let w3 = CheckMenuItem::new("Window: 3 ms", true, cur_w == 3, None);
     let w5 = CheckMenuItem::new("Window: 5 ms", true, cur_w == 5, None);
     let w8 = CheckMenuItem::new("Window: 8 ms", true, cur_w == 8, None);
@@ -146,6 +148,13 @@ pub fn spawn(ctx: egui::Context) -> Option<Tray> {
                     // gets to hand the pad back. Release it here or a button
                     // held at quit time stays held in every game.
                     crate::sync_service::release_pad();
+                    // Unless the user asked us to leave it, take the controller
+                    // out of Windows on the way out. Leaving it behind meant a
+                    // phantom Xbox pad in Steam with NOBD closed and the stick
+                    // unplugged - a second identical controller nothing explains.
+                    if crate::persist::load_ui().keep_controller == 0 {
+                        let _ = crate::nobd_setup::eject();
+                    }
                     std::process::exit(0);
                 }
                 // Wake the UI so check marks re-sync to the new state.

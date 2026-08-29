@@ -244,6 +244,26 @@ pub fn relaunch_elevated_for_setup(mode: PadType) -> io::Result<()> {
     Ok(())
 }
 
+/// Relaunch elevated to remove the virtual controller, for the case where the
+/// app itself is not elevated. Mirrors `relaunch_elevated_for_setup`.
+pub fn relaunch_elevated_for_eject() -> io::Result<()> {
+    let exe = std::env::current_exe()?;
+    let verb: Vec<u16> = "runas\0".encode_utf16().collect();
+    let file: Vec<u16> = exe
+        .to_string_lossy()
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let args: Vec<u16> = "--eject\0".encode_utf16().collect();
+    let r = unsafe {
+        ShellExecuteW(0, verb.as_ptr(), file.as_ptr(), args.as_ptr(), std::ptr::null(), 0)
+    };
+    if (r as isize) <= 32 {
+        return Err(io::Error::other("admin request cancelled"));
+    }
+    Ok(())
+}
+
 /// Register a Scheduled Task that relaunches nobd.exe elevated at logon, so
 /// after setup there is no per-launch UAC prompt (config-1). Re-registering also
 /// repoints the task at the CURRENT exe, so calling it again repairs a stale path.

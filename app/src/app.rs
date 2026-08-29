@@ -119,6 +119,10 @@ pub struct FingerGapApp {
     /// Hide the physical stick from games via HidHide (HID source only), so only
     /// the NOBD Controller shows up in Steam.
     hide_stick: bool,
+    /// Leave the NOBD Controller in Windows after NOBD closes. Off by default:
+    /// the devnode outlives the process, so keeping it left a phantom Xbox pad in
+    /// Steam with the app shut and the stick unplugged.
+    keep_controller: bool,
     /// One-shot: reconcile HidHide cloak with intent on the first frame (restores
     /// hiding after a relaunch, or clears a stale cloak after a crash).
     startup_hide_done: bool,
@@ -219,6 +223,7 @@ impl FingerGapApp {
             setup_msg: None,
             setup_rx: None,
             hide_stick: ui_cfg.hide_stick != 0,
+            keep_controller: ui_cfg.keep_controller != 0,
             startup_hide_done: false,
             auto_input,
             autostart_enabled: crate::nobd_setup::login_task_present(),
@@ -428,6 +433,54 @@ impl FingerGapApp {
         }
     }
 
+    /// The master switch. The NOBD Controller exists if and only if NOBD is on.
+    ///
+    /// The virtual pad's only reason to exist is to carry synced input, so
+    /// leaving it in Windows with sync off just put a second, identical Xbox
+    /// controller in Steam that nothing explained — XInput exposes no device
+    /// identity, so it cannot even be told apart from the real one by name.
+    ///
+    /// `enabled` survives as a BYPASS (Details, and the tray) for A/B testing:
+    /// that keeps the pad bound while passing presses through, so a game does
+    /// not have its controller yanked mid-match just to compare.
+    fn set_nobd_on(&mut self, on: bool) {
+        use std::sync::atomic::Ordering;
+        let st = nobd_shared::state();
+        if on {
+            st.enabled.store(1, Ordering::Relaxed);
+            st.reset_stats();
+            if !self.controller_present {
+                if crate::nobd_setup::is_elevated() {
+                    self.begin_turn_on();
+                } else if crate::nobd_setup::relaunch_elevated_for_setup(self.pad_type).is_ok() {
+                    std::process::exit(0);
+                } else {
+                    self.setup_msg = Some("Cancelled \u{2014} nothing was installed.".to_owned());
+                }
+            }
+            return;
+        }
+
+        // Off: stop syncing AND take the controller back out of Windows.
+        st.enabled.store(0, Ordering::Relaxed);
+        st.reset_stats();
+        self.sync_service = crate::sync_service::SyncService::stopped();
+        let r = if crate::nobd_setup::is_elevated() {
+            crate::nobd_setup::eject().map(|_| ())
+        } else {
+            crate::nobd_setup::relaunch_elevated_for_eject()
+        };
+        match r {
+            Ok(()) => {
+                self.controller_present = false;
+                self.setup_msg = None;
+            }
+            Err(e) => self.setup_msg = Some(format!("Couldn't remove the controller: {e}")),
+        }
+        self.apply_stick_hiding();
+        self.persist_ui();
+    }
+
     /// Replace the running sync service, OLD ONE FIRST.
     ///
     /// `self.sync_service = SyncService::start(..)` looks equivalent but is not:
@@ -468,6 +521,7 @@ impl FingerGapApp {
                 .unwrap_or_default(),
             pad_type: self.pad_type.as_u32(),
             hide_stick: self.hide_stick as u32,
+            keep_controller: self.keep_controller as u32,
         });
     }
 
@@ -922,7 +976,7 @@ impl FingerGapApp {
                     // never heard of a millisecond.
                     let title = match phase {
                         Phase::NotInstalled => "SET UP NOBD",
-                        Phase::NeedsDevice => "THE NOBD CONTROLLER IS GONE",
+                        Phase::NeedsDevice => "NOBD IS OFF",
                         Phase::NoStick => "NO CONTROLLER FOUND",
                         Phase::SyncOff => "NOBD IS OFF",
                         Phase::Waiting => "TRY A DASH",
@@ -952,19 +1006,13 @@ impl FingerGapApp {
                             let label = if phase == Phase::NotInstalled {
                                 "Install NOBD Controller"
                             } else {
-                                "Add NOBD Controller back"
+                                "Turn NOBD on"
                             };
                             if ui
                                 .add_sized([260.0, 36.0], egui::Button::new(RichText::new(label).size(15.0).strong()))
                                 .clicked()
                             {
-                                if crate::nobd_setup::is_elevated() {
-                                    self.begin_turn_on();
-                                } else if crate::nobd_setup::relaunch_elevated_for_setup(self.pad_type).is_ok() {
-                                    std::process::exit(0);
-                                } else {
-                                    self.setup_msg = Some("Cancelled \u{2014} nothing was installed.".to_owned());
-                                }
+                                self.set_nobd_on(true);
                             }
                             if phase == Phase::NotInstalled
                                 && ui.button(RichText::new("What this installs").size(11.0).color(ACTION)).clicked()
@@ -974,8 +1022,10 @@ impl FingerGapApp {
                         });
                     }
                     Phase::SyncOff => {
+                        // Bypass: the controller is still there, presses are just
+                        // passing through ungrouped.
                         if ui
-                            .add_sized([160.0, 34.0], egui::Button::new(RichText::new("Turn sync on").size(14.0).strong()))
+                            .add_sized([160.0, 34.0], egui::Button::new(RichText::new("Resume syncing").size(14.0).strong()))
                             .clicked()
                         {
                             let st = nobd_shared::state();
@@ -1133,6 +1183,24 @@ impl FingerGapApp {
                 );
                 ui.label(RichText::new(name).size(15.0).strong().color(ink));
 
+                // XInput exposes no device identity - every XInput pad is just
+                // "Xbox 360 Controller" - so when your stick is also XInput the
+                // two are literally indistinguishable by name. We DO know which
+                // slot is ours (we fingerprint it at startup), and the slot
+                // number is the one thing that tells them apart.
+                if live {
+                    if let Some(slot) = self.sync_service.virtual_slot() {
+                        ui.label(
+                            RichText::new(format!(
+                                "If your game lists two Xbox controllers, NOBD is player {}.",
+                                slot + 1
+                            ))
+                            .size(11.0)
+                            .color(INK_DIM),
+                        );
+                    }
+                }
+
                 if live && self.source_kind == SourceKind::XInput && self.pad_type == PadType::Xinput {
                     ui.horizontal_wrapped(|ui| {
                         // NotoEmoji is drawn at scale 0.81, so an inline warning
@@ -1222,7 +1290,16 @@ impl FingerGapApp {
             ui.add_enabled_ui(live, |ui| {
                 status_dot(ui, if on && live { LIVE } else { INK_FAINT }, on && live);
                 ui.add_space(4.0);
-                ui.label(RichText::new(if on { "Sync on" } else { "Sync off" }).size(13.0));
+                ui.label(
+                    RichText::new(if !live {
+                        "NOBD off"
+                    } else if on {
+                        "NOBD on"
+                    } else {
+                        "bypassed"
+                    })
+                    .size(13.0),
+                );
                 ui.label(RichText::new("\u{00B7}").size(13.0).color(INK_FAINT));
                 // The preset NAME is the control; the number is for whoever
                 // wants it. A player picking "Normal" needs no unit at all.
@@ -1254,9 +1331,11 @@ impl FingerGapApp {
                 {
                     self.details_open = !self.details_open;
                 }
-                if live && ui.button(RichText::new(if on { "Turn off" } else { "Turn on" }).size(12.0)).clicked() {
-                    st.enabled.store(!on as u32, Ordering::Relaxed);
-                    st.reset_stats();
+                if ui
+                    .button(RichText::new(if live { "Turn NOBD off" } else { "Turn NOBD on" }).size(12.0))
+                    .clicked()
+                {
+                    self.set_nobd_on(!live);
                 }
             });
         });
@@ -1430,6 +1509,17 @@ impl FingerGapApp {
 
                 ui.add_space(10.0);
                 ui.separator();
+                if self.controller_present {
+                    let mut keep = self.keep_controller;
+                    if ui
+                        .checkbox(&mut keep, RichText::new("Keep the NOBD Controller when NOBD isn't running").size(12.0))
+                        .on_hover_text("Off (default): the controller is removed when you quit, so it never shows up in Steam while NOBD is closed. On: it stays, and works without opening the app.")
+                        .changed()
+                    {
+                        self.keep_controller = keep;
+                        self.persist_ui();
+                    }
+                }
                 if self.controller_present
                     && ui
                         .button(RichText::new("Remove NOBD Controller").size(12.0).color(INK_DIM))
@@ -1438,8 +1528,16 @@ impl FingerGapApp {
                 {
                     // The failure used to be swallowed by `&& eject().is_ok()`,
                     // so a non-elevated click was a completely silent no-op.
-                    match crate::nobd_setup::eject() {
-                        Ok(_) => {
+                    // Elevate if we have to, the same way Install does. Without
+                    // this a non-elevated user got "eject requires elevation" and
+                    // no way to act on it - the controller was unremovable.
+                    let r = if crate::nobd_setup::is_elevated() {
+                        crate::nobd_setup::eject().map(|_| ())
+                    } else {
+                        crate::nobd_setup::relaunch_elevated_for_eject()
+                    };
+                    match r {
+                        Ok(()) => {
                             self.controller_present = false;
                             self.sync_service = crate::sync_service::SyncService::stopped();
                             self.apply_stick_hiding();
