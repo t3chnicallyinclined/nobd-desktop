@@ -100,7 +100,7 @@ fn main() -> eframe::Result {
     // handles closed it saw ERROR_ALREADY_EXISTS, returned early, and NOTHING
     // WAS EVER INSTALLED — with no error anywhere. Setup is short-lived and
     // idempotent; it does not need the guard.
-    let is_setup_run = std::env::args().any(|a| a.starts_with("--setup-") || a == "--uninstall" || a == "--eject" || a == "--hid-probe" || a == "--hook-probe");
+    let is_setup_run = std::env::args().any(|a| a.starts_with("--setup-") || a == "--uninstall" || a == "--eject" || a == "--remove-legacy" || a == "--hid-probe" || a == "--hook-probe");
     if !is_setup_run && !claim_single_instance() {
         return Ok(());
     }
@@ -142,6 +142,15 @@ fn main() -> eframe::Result {
             out.push_str("no HID gamepads found\n");
         }
         let _ = std::fs::write(std::env::temp_dir().join("nobd-hidprobe.txt"), out);
+        return Ok(());
+    }
+
+    // `--remove-legacy`: headless teardown of the old virtual-controller stack,
+    // elevated. The in-game hook needs none of it.
+    if std::env::args().any(|a| a == "--remove-legacy") {
+        let report = nobd_setup::uninstall_everything();
+        let log = std::env::temp_dir().join("nobd-legacy-removal.log");
+        let _ = std::fs::write(&log, report);
         return Ok(());
     }
 

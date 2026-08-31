@@ -148,6 +148,15 @@ unsafe fn continuous_apply(p: usize, btn: *mut u16, raw: u16) {
 fn continuous_poll_loop() {
     let mut sw = [SyncWindow::new(), SyncWindow::new()];
     let mut last_raw_atks = [0u16; NUM_PLAYERS];
+    // Raw chord tracking, identical in rule to the desktop app's SyncTelemetry:
+    // a group opens on the first attack press, closes when every attack is
+    // released OR one frame has passed. The frame cap is load-bearing - without
+    // it, holding one attack and pressing another a second later reports a
+    // one-second "finger gap".
+    let mut grp_first = [0u64; NUM_PLAYERS];
+    let mut grp_last = [0u64; NUM_PLAYERS];
+    let mut grp_mask = [0u16; NUM_PLAYERS];
+    let mut grp_open = [false; NUM_PLAYERS];
     // Passive monitor (sync OFF): lead-press timestamp of a potential pair, per player.
     let mut shadow_lead = [None::<u64>; NUM_PLAYERS];
     let mut iters: u64 = 0;
@@ -179,6 +188,29 @@ fn continuous_poll_loop() {
                     }
                 }
             }
+            // Close a finished raw group and publish what the fingers did.
+            if grp_open[p]
+                && (raw_atks == 0
+                    || now.saturating_sub(grp_first[p]) >= crate::config::FRAME_US)
+            {
+                if grp_mask[p].count_ones() >= 2 {
+                    let gap = grp_last[p].saturating_sub(grp_first[p]);
+                    crate::config::record_raw_gap(p, gap);
+                    crate::config::record_risk(p, gap);
+                }
+                grp_open[p] = false;
+                grp_mask[p] = 0;
+            }
+            if rising != 0 {
+                if !grp_open[p] {
+                    grp_first[p] = now;
+                    grp_mask[p] = 0;
+                    grp_open[p] = true;
+                }
+                grp_last[p] = now;
+                grp_mask[p] |= rising;
+            }
+
             last_raw_atks[p] = raw_atks;
 
             // Passive monitor while sync is OFF.

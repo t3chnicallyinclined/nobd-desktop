@@ -147,6 +147,19 @@ fn cert_thumbprint(cer_path: &std::path::Path) -> Option<String> {
         .find(|l| l.len() == 40 && l.chars().all(|c| c.is_ascii_hexdigit()))
 }
 
+/// Is any of the OLD virtual-controller stack still on this machine?
+///
+/// The in-game hook needs none of it: no driver, no certificate, no devnode, no
+/// scheduled task. Anyone upgrading from a virtual-controller build is still
+/// carrying all four, including a self-signed certificate in the machine root
+/// store and a controller that shows up in Steam as a second Xbox pad.
+pub fn legacy_stack_present() -> bool {
+    device_present()
+        || hm_native::install::package_installed("hidmaestro.inf")
+        || hm_native::install::package_installed("hidmaestro_xusb.inf")
+        || login_task_present()
+}
+
 /// Remove EVERYTHING NOBD put on this machine. Elevated, headless — this is what
 /// the uninstaller runs before deleting the program files.
 ///
@@ -255,6 +268,25 @@ pub fn relaunch_elevated_for_eject() -> io::Result<()> {
         .chain(std::iter::once(0))
         .collect();
     let args: Vec<u16> = "--eject\0".encode_utf16().collect();
+    let r = unsafe {
+        ShellExecuteW(0, verb.as_ptr(), file.as_ptr(), args.as_ptr(), std::ptr::null(), 0)
+    };
+    if (r as isize) <= 32 {
+        return Err(io::Error::other("admin request cancelled"));
+    }
+    Ok(())
+}
+
+/// Relaunch elevated to tear down the old virtual-controller stack.
+pub fn relaunch_elevated_for_legacy_removal() -> io::Result<()> {
+    let exe = std::env::current_exe()?;
+    let verb: Vec<u16> = "runas\0".encode_utf16().collect();
+    let file: Vec<u16> = exe
+        .to_string_lossy()
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let args: Vec<u16> = "--remove-legacy\0".encode_utf16().collect();
     let r = unsafe {
         ShellExecuteW(0, verb.as_ptr(), file.as_ptr(), args.as_ptr(), std::ptr::null(), 0)
     };

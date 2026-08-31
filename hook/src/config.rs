@@ -73,6 +73,35 @@ pub fn record_gp_latency(p: usize, us: u64) {
 
 #[inline] pub fn record_frame_wait(p: usize) { pstat(p).frame_waits.fetch_add(1, Ordering::Relaxed); }
 #[inline] pub fn record_save(p: usize) { pstat(p).saves.fetch_add(1, Ordering::Relaxed); }
+/// One 60 Hz frame. A raw press group open longer than this is a held button,
+/// not a chord attempt.
+pub const FRAME_US: u64 = 16_667;
+
+/// A chord the player ATTEMPTED, with the gap their fingers actually made -
+/// measured off the raw stream BEFORE the window touches it.
+///
+/// The grouped `record_gap` above can only ever see chords the window succeeded
+/// in grouping, so it is censored at the window width and can never say "your
+/// window is too tight". This one is not.
+pub fn record_raw_gap(p: usize, gap_us: u64) {
+    let s = pstat(p);
+    s.attempts.fetch_add(1, Ordering::Relaxed);
+    s.raw_gap_sum_us.fetch_add(gap_us, Ordering::Relaxed);
+    s.raw_gap_count.fetch_add(1, Ordering::Relaxed);
+    s.raw_gap_max_us.fetch_max(gap_us, Ordering::Relaxed);
+}
+
+/// Accumulate the PROBABILITY a free-running 60 Hz poll would have split this
+/// pair, in millionths. A sum of odds, not a count of coin flips: the in-game
+/// hook can also observe real saves (`record_save`), but this keeps the app's
+/// headline comparable whichever source is feeding it.
+pub fn record_risk(p: usize, gap_us: u64) {
+    let risk = (gap_us as f64 / FRAME_US as f64).min(1.0);
+    pstat(p)
+        .risk_sum_ppm
+        .fetch_add((risk * 1_000_000.0) as u64, Ordering::Relaxed);
+}
+
 #[inline] pub fn record_attempt(p: usize) { pstat(p).attempts.fetch_add(1, Ordering::Relaxed); }
 #[inline] pub fn record_miss(p: usize) { pstat(p).misses.fetch_add(1, Ordering::Relaxed); }
 

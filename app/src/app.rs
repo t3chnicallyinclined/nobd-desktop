@@ -137,6 +137,11 @@ pub struct FingerGapApp {
     /// answering it costs a `tasklist` spawn, so it must never be asked during
     /// painting.
     game_is_running: bool,
+    /// The old virtual-controller stack is still installed. Checked once at
+    /// startup - it walks the DriverStore and spawns schtasks.
+    legacy_present: bool,
+    /// The user dismissed the migration offer for this session.
+    legacy_dismissed: bool,
     /// Leave the NOBD Controller in Windows after NOBD closes. Off by default:
     /// the devnode outlives the process, so keeping it left a phantom Xbox pad in
     /// Steam with the app shut and the stick unplugged.
@@ -248,13 +253,31 @@ impl FingerGapApp {
             setup_msg: None,
             setup_rx: None,
             hide_stick: ui_cfg.hide_stick != 0,
-            game_dir: crate::gameinstall::find_game_dir(),
+            game_dir: {
+                // `enabled` used to be half of the virtual-controller switch, so
+                // anyone who turned that off is carrying enabled=0 into a build
+                // where it means something else entirely: the in-game hook
+                // silently doing nothing. Turning the pad off was never a request
+                // to stop syncing in Marvel, so restore intent when the hook is
+                // the path.
+                let d = crate::gameinstall::find_game_dir();
+                if d.is_some() && !crate::nobd_setup::device_present() {
+                    use std::sync::atomic::Ordering;
+                    let st = nobd_shared::state();
+                    if st.enabled.load(Ordering::Relaxed) == 0 {
+                        st.enabled.store(1, Ordering::Relaxed);
+                    }
+                }
+                d
+            },
             hook_installed: false,
             hook_msg: None,
             hb_last: 0,
             hb_seen_at: None,
             hb_poll_at: std::time::Instant::now(),
             game_is_running: false,
+            legacy_present: crate::nobd_setup::legacy_stack_present(),
+            legacy_dismissed: false,
             keep_controller: ui_cfg.keep_controller != 0,
             startup_hide_done: false,
             auto_input,
@@ -924,11 +947,17 @@ impl FingerGapApp {
 
         egui::CentralPanel::default().show(ctx, |ui| {
             self.draw_hook_status(ui);
+            self.draw_legacy_note(ui);
             ui.add_space(10.0);
-            self.draw_hero(ui);
-            self.draw_update_note(ui);
-            ui.add_space(12.0);
-            self.draw_last_step(ui);
+            // The virtual-pad hero and the "pick NOBD Controller in your game"
+            // card only make sense when the virtual pad IS the path. With the
+            // hook installed they contradict the card above it.
+            if !self.hook_is_path() {
+                self.draw_hero(ui);
+                self.draw_update_note(ui);
+                ui.add_space(12.0);
+                self.draw_last_step(ui);
+            }
             ui.add_space(12.0);
             self.draw_tape(ui);
         });
@@ -996,6 +1025,13 @@ impl FingerGapApp {
 
     /// B — the hero. Always answers "is it working", and when the answer is no
     /// it also HOLDS the button that fixes it, at the same geometry every time.
+    /// Is the in-game hook the active path? When it is, the virtual controller
+    /// is not just unnecessary, it is the thing that puts a second identical
+    /// Xbox pad in Steam - so its whole UI comes off the screen.
+    fn hook_is_path(&self) -> bool {
+        self.game_dir.is_some() && self.hook_installed
+    }
+
     /// Is the in-game hook running RIGHT NOW? True only while the heartbeat is
     /// still moving - it goes false a second after the game closes.
     fn hook_live(&self) -> bool {
@@ -1032,6 +1068,19 @@ impl FingerGapApp {
                     .clone()
                     .unwrap_or_else(|| "Putting NOBD into your Marvel folder.".to_owned()),
             ),
+            // Never claim READY while presses are passing straight through.
+            (Some(_), true, _)
+                if nobd_shared::state()
+                    .enabled
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                    == 0 =>
+            {
+                (
+                    NEEDS_YOU,
+                    "SYNC IS PAUSED",
+                    "NOBD is in the game but passing your presses straight through. Resume it below.".to_owned(),
+                )
+            }
             (Some(_), true, false) => (
                 INK_DIM,
                 "READY \u{2014} LAUNCH MARVEL",
@@ -1096,6 +1145,15 @@ impl FingerGapApp {
             _ => HAIRLINE,
         };
 
+        // Where these numbers come from. The same PlayerStats block is written
+        // either by the in-game hook or by the app's own sync loop, and the
+        // difference matters to what they are worth: in-game, a save is an
+        // observation, because the hook can see the game's real read cadence.
+        let source = if self.hook_live() {
+            "measured inside Marvel"
+        } else {
+            "measured in the sync loop"
+        };
         egui::Frame::new()
             .inner_margin(14.0)
             .corner_radius(10.0)
@@ -1211,7 +1269,7 @@ impl FingerGapApp {
                         ui.add_space(4.0);
                         ui.label(
                             RichText::new(format!(
-                                "Your two fingers land about {gap_avg:.1} thousandths of a second apart (worst {gap_max:.1}). NOBD waits {hold_avg:.1} of those to catch the second one \u{2014} a fraction of a single frame (at most {hold_max:.1})."
+                                "Your two fingers land about {gap_avg:.1} thousandths of a second apart (worst {gap_max:.1}). NOBD waits {hold_avg:.1} of those to catch the second one \u{2014} a fraction of a single frame (at most {hold_max:.1}). {source}."
                             ))
                             .size(11.0)
                             .color(INK_DIM),
@@ -1239,6 +1297,62 @@ impl FingerGapApp {
                 if let Some(msg) = &self.setup_msg {
                     ui.colored_label(BROKEN, RichText::new(msg).size(12.0));
                 }
+            });
+    }
+
+    /// Offer to remove the old virtual-controller stack.
+    ///
+    /// Prompted, never silent: this uninstalls a driver, deletes a certificate
+    /// from the machine root store and removes a scheduled task. Doing that
+    /// behind someone's back would be exactly the kind of thing the install
+    /// disclosure exists to prevent, even when it is the right outcome.
+    fn draw_legacy_note(&mut self, ui: &mut Ui) {
+        if !self.legacy_present || self.legacy_dismissed {
+            return;
+        }
+        ui.add_space(8.0);
+        egui::Frame::new()
+            .inner_margin(10.0)
+            .corner_radius(8.0)
+            .fill(SURFACE)
+            .stroke(egui::Stroke::new(1.0, NEEDS_YOU))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.label(
+                    RichText::new("NOBD no longer needs the virtual controller")
+                        .size(13.0)
+                        .strong()
+                        .color(INK),
+                );
+                ui.label(RichText::new("It works inside the game now. The old setup left a driver, a signing certificate, a start-up task and the extra Xbox controller you see in Steam. None of it is needed any more.").size(11.0).color(INK_DIM));
+                ui.horizontal(|ui| {
+                    if ui
+                        .button(RichText::new("Remove it").size(12.0).strong())
+                        .clicked()
+                    {
+                        let r = if crate::nobd_setup::is_elevated() {
+                            std::fs::write(
+                                std::env::temp_dir().join("nobd-legacy-removal.log"),
+                                crate::nobd_setup::uninstall_everything(),
+                            )
+                            .map_err(|e| e.to_string())
+                        } else {
+                            crate::nobd_setup::relaunch_elevated_for_legacy_removal()
+                                .map_err(|e| e.to_string())
+                        };
+                        match r {
+                            Ok(()) => {
+                                self.legacy_present = false;
+                                self.controller_present = false;
+                                self.sync_service = crate::sync_service::SyncService::stopped();
+                            }
+                            Err(e) => self.setup_msg = Some(format!("Couldn't remove it: {e}")),
+                        }
+                    }
+                    if ui.button(RichText::new("Not now").size(12.0)).clicked() {
+                        self.legacy_dismissed = true;
+                    }
+                });
             });
     }
 
@@ -1418,6 +1532,7 @@ impl FingerGapApp {
         use std::sync::atomic::Ordering;
         let st = nobd_shared::state();
         let live = self.controller_present;
+        let hook = self.hook_is_path();
         let on = st.enabled.load(Ordering::Relaxed) != 0;
         let cur = st.window_ms[0].load(Ordering::Relaxed).clamp(1, 16);
         let rec = st.players[0].recommended_window_ms();
@@ -1428,11 +1543,14 @@ impl FingerGapApp {
         };
 
         ui.horizontal_centered(|ui| {
-            ui.add_enabled_ui(live, |ui| {
-                status_dot(ui, if on && live { LIVE } else { INK_FAINT }, on && live);
+            ui.add_enabled_ui(live || hook, |ui| {
+                let running = on && (live || hook);
+                status_dot(ui, if running { LIVE } else { INK_FAINT }, running);
                 ui.add_space(4.0);
                 ui.label(
-                    RichText::new(if !live {
+                    RichText::new(if hook {
+                        if on { "syncing" } else { "bypassed" }
+                    } else if !live {
                         "NOBD off"
                     } else if on {
                         "NOBD on"
@@ -1472,7 +1590,15 @@ impl FingerGapApp {
                 {
                     self.details_open = !self.details_open;
                 }
-                if ui
+                if hook {
+                    if ui
+                        .button(RichText::new(if on { "Pause sync" } else { "Resume sync" }).size(12.0))
+                        .clicked()
+                    {
+                        st.enabled.store(!on as u32, Ordering::Relaxed);
+                        st.reset_stats();
+                    }
+                } else if ui
                     .button(RichText::new(if live { "Turn NOBD off" } else { "Turn NOBD on" }).size(12.0))
                     .clicked()
                 {
