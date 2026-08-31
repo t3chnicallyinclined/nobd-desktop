@@ -1,0 +1,28 @@
+[package]
+name = "nobd-hook"
+version = "0.6.1"
+edition = "2021"
+description = "NOBD in-game sync window - a DINPUT8.dll proxy for MvC2"
+
+[lints.rust]
+# Cargo derives the crate name from [lib] name, which must be DINPUT8 so the
+# game loads us; the casing lint is not meaningful here.
+non_snake_case = "allow"
+
+[lib]
+# The game statically imports DINPUT8.dll, so naming the output that makes the
+# game load us itself: no injection, no detour just to get in the door.
+name = "DINPUT8"
+crate-type = ["cdylib"]
+
+[dependencies]
+nobd-shared = { path = "../shared" }
+retour = "0.3"
+windows-sys = { version = "0.52", features = [
+    "Win32_Foundation",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_SystemServices",
+    "Win32_System_SystemInformation",
+    "Win32_UI_WindowsAndMessaging",
+] }

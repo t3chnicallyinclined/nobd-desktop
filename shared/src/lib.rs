@@ -47,6 +47,12 @@ pub struct PlayerStats {
     // clock has no relationship to the game's poll phase, so any single verdict
     // is a draw, while the sum is an unbiased estimate.
     pub risk_sum_ppm: AtomicU64,
+    // Frame-boundary saves the IN-GAME hook actually OBSERVED: a grouped
+    // delivery where a withheld member had already been seen across one of the
+    // game's own reads. Distinct from `risk_sum_ppm` above, which is an
+    // expectation - the hook can see the game's real read cadence, so here the
+    // save is a measurement rather than an estimate. Only the DLL writes it.
+    pub saves: AtomicU64,
     // game frame time (µs) from this controller's read cadence
     pub frame_us: AtomicU64,
     // game-perceived input latency (µs): physical press → first game read
@@ -75,7 +81,7 @@ impl PlayerStats {
         for a in [
             &self.groups, &self.singles, &self.lat_last_us, &self.lat_max_us,
             &self.lat_sum_us, &self.lat_count, &self.gap_sum_us, &self.gap_max_us,
-            &self.gap_count, &self.risk_sum_ppm, &self.frame_us, &self.gp_lat_sum_us,
+            &self.gap_count, &self.risk_sum_ppm, &self.saves, &self.frame_us, &self.gp_lat_sum_us,
             &self.gp_lat_count, &self.gp_lat_max_us, &self.frame_waits,
             &self.raw_gap_sum_us, &self.raw_gap_count, &self.raw_gap_max_us,
             &self.attempts, &self.misses,

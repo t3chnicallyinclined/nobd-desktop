@@ -1,5 +1,5 @@
 [workspace]
-members = ["app", "shared", "hm-native", "linux"]
+members = ["app", "shared", "hm-native", "linux", "hook"]
 resolver = "2"
 
 # `app` and `hm-native` are Windows-only; `linux` is Linux-only. Nothing builds
@@ -7,7 +7,7 @@ resolver = "2"
 #   Windows: cargo build -p nobd-app --release
 #   Linux:   cargo build -p nobd-linux --release
 
-# Universal sync replaced the per-game DINPUT8.dll, so the cdylib package is gone.
+# `hook` is the in-game DINPUT8.dll proxy (Windows-only cdylib).
 [profile.release]
 opt-level = 2
 lto = true

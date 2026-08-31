@@ -99,8 +99,26 @@ fn main() -> eframe::Result {
     // handles closed it saw ERROR_ALREADY_EXISTS, returned early, and NOTHING
     // WAS EVER INSTALLED — with no error anywhere. Setup is short-lived and
     // idempotent; it does not need the guard.
-    let is_setup_run = std::env::args().any(|a| a.starts_with("--setup-") || a == "--uninstall" || a == "--eject");
+    let is_setup_run = std::env::args().any(|a| a.starts_with("--setup-") || a == "--uninstall" || a == "--eject" || a == "--hid-probe");
     if !is_setup_run && !claim_single_instance() {
+        return Ok(());
+    }
+
+    // `--hid-probe`: dump every HID gamepad's report layout to
+    // %TEMP%\nobd-hidprobe.txt. Development aid for retargeting the HID filter.
+    if std::env::args().any(|a| a == "--hid-probe") {
+        let mut out = String::new();
+        for d in hid::list_hid_gamepads() {
+            if d.id.vid == 0x1209 {
+                continue; // our own virtual pad
+            }
+            out.push_str(&hid::probe_report(&d.id(), 45));
+            out.push_str("\n----------------------------------------\n\n");
+        }
+        if out.is_empty() {
+            out.push_str("no HID gamepads found\n");
+        }
+        let _ = std::fs::write(std::env::temp_dir().join("nobd-hidprobe.txt"), out);
         return Ok(());
     }
 

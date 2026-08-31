@@ -736,3 +736,121 @@ mod tests {
         }
     }
 }
+
+/// Dump a stick's report layout to a file: caps, then live reports as raw hex
+/// beside the button bitmask `HidP_GetUsages` extracts from them.
+///
+/// This exists to answer ONE question before any driver code depends on it: do
+/// this stick's buttons actually live in a contiguous run of bytes at a fixed
+/// offset? The HID filter scaffold assumes they do (`BUTTON_BYTE_OFFSET`), and
+/// that assumption is the whole plug-and-play story — better to check it against
+/// real hardware than to hardcode it and find out later.
+pub fn probe_report(id: &HidDeviceId, seconds: u64) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    unsafe {
+        let wpath = to_wide(&id.path);
+        let h = CreateFileW(
+            wpath.as_ptr(),
+            FILE_GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_OVERLAPPED,
+            0,
+        );
+        if h == INVALID_HANDLE_VALUE {
+            return format!("cannot open {}\n", id.path);
+        }
+        let mut pp: isize = 0;
+        if HidD_GetPreparsedData(h, &mut pp) == 0 {
+            CloseHandle(h);
+            return "no preparsed data\n".into();
+        }
+        let mut caps: HIDP_CAPS = std::mem::zeroed();
+        if HidP_GetCaps(pp, &mut caps) != HIDP_STATUS_SUCCESS {
+            cleanup(h, pp);
+            return "HidP_GetCaps failed\n".into();
+        }
+        let report_len = caps.InputReportByteLength as usize;
+        let _ = writeln!(
+            out,
+            "device      {:04x}:{:04x}\npath        {}\nusage       page 0x{:02x} usage 0x{:02x}\nreport len  {} bytes\nbtn caps    {}\nvalue caps  {}",
+            id.vid, id.pid, id.path, caps.UsagePage, caps.Usage, report_len,
+            caps.NumberInputButtonCaps, caps.NumberInputValueCaps
+        );
+
+        let mut nbtn = caps.NumberInputButtonCaps;
+        let mut btn_caps: HIDP_BUTTON_CAPS = std::mem::zeroed();
+        if nbtn == 0
+            || HidP_GetButtonCaps(HidP_Input, &mut btn_caps, &mut nbtn, pp) != HIDP_STATUS_SUCCESS
+        {
+            cleanup(h, pp);
+            return out + "no button caps\n";
+        }
+        let page = btn_caps.UsagePage;
+        let umin = btn_caps.Anonymous.Range.UsageMin;
+        let umax = btn_caps.Anonymous.Range.UsageMax;
+        let report_id = btn_caps.ReportID;
+        let _ = writeln!(
+            out,
+            "buttons     page 0x{page:02x} usage {umin}..{umax} reportID {report_id}\n"
+        );
+
+        let max_usages = HidP_MaxUsageListLength(HidP_Input, page, pp).max(1) as usize;
+        let event = CreateEventW(std::ptr::null(), 1, 0, std::ptr::null());
+        let mut ov: OVERLAPPED = std::mem::zeroed();
+        ov.hEvent = event;
+        let mut report = vec![0u8; report_len];
+        let mut usage_buf = vec![0u16; max_usages];
+
+        let _ = writeln!(out, "press every attack button in turn:\n");
+        let _ = writeln!(out, "{:<44}  {:>6}  buttons", "raw report (hex)", "mask");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
+        let mut last = String::new();
+        while std::time::Instant::now() < deadline {
+            ResetEvent(event);
+            let mut got: u32 = 0;
+            let rf = ReadFile(h, report.as_mut_ptr(), report_len as u32, std::ptr::null_mut(), &mut ov);
+            if rf == 0 {
+                if GetLastError() != ERROR_IO_PENDING {
+                    break;
+                }
+                if WaitForSingleObject(event, 500) != WAIT_OBJECT_0 {
+                    continue;
+                }
+            }
+            if GetOverlappedResult(h, &ov, &mut got, 0) == 0 {
+                break;
+            }
+            let mut n = max_usages as u32;
+            let mut mask: u32 = 0;
+            let mut names = String::new();
+            if HidP_GetUsages(
+                HidP_Input, page, 0, usage_buf.as_mut_ptr(), &mut n, pp,
+                report.as_mut_ptr(), got,
+            ) == HIDP_STATUS_SUCCESS
+            {
+                for &u in usage_buf.iter().take(n as usize) {
+                    let bit = u.wrapping_sub(umin);
+                    if bit < 32 {
+                        mask |= 1 << bit;
+                    }
+                    let _ = write!(names, "{} ", bit + 1);
+                }
+            }
+            let hex: String = report[..got as usize]
+                .iter()
+                .map(|b| format!("{b:02x} "))
+                .collect();
+            let line = format!("{hex:<44}  0x{mask:04x}  {names}");
+            if line != last {
+                let _ = writeln!(out, "{line}");
+                last = line;
+            }
+        }
+        CloseHandle(event);
+        cleanup(h, pp);
+    }
+    out
+}
