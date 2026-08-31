@@ -119,6 +119,24 @@ pub struct FingerGapApp {
     /// Hide the physical stick from games via HidHide (HID source only), so only
     /// the NOBD Controller shows up in Steam.
     hide_stick: bool,
+    /// Where Marvel lives, if we found it. `None` = not installed on this PC.
+    game_dir: Option<std::path::PathBuf>,
+    /// Is OUR current DINPUT8.dll in that folder? Byte-compared, not merely
+    /// present - a stale build is worse than none (see gameinstall::is_current).
+    hook_installed: bool,
+    /// Last problem from the auto-install, shown verbatim.
+    hook_msg: Option<String>,
+    /// Heartbeat tracking. The in-game DLL bumps `dll_heartbeat` on every read,
+    /// so a value that MOVED since we last looked means the hook is live in a
+    /// running game. A value that is merely non-zero proves nothing - it
+    /// persists in shared memory after the game exits.
+    hb_last: u64,
+    hb_seen_at: Option<std::time::Instant>,
+    hb_poll_at: std::time::Instant,
+    /// Is Marvel running? Cached from the same 4 Hz poll as the heartbeat -
+    /// answering it costs a `tasklist` spawn, so it must never be asked during
+    /// painting.
+    game_is_running: bool,
     /// Leave the NOBD Controller in Windows after NOBD closes. Off by default:
     /// the devnode outlives the process, so keeping it left a phantom Xbox pad in
     /// Steam with the app shut and the stick unplugged.
@@ -217,12 +235,26 @@ impl FingerGapApp {
             hid_devices,
             selected_hid,
             selected_hid_label,
-            sync_service: crate::sync_service::SyncService::start(pad_type, sync_src),
+            // Only run the virtual-pad loop when that controller actually
+            // exists. The in-game hook is the default path now; starting a
+            // second sync loop beside it is how you get two windows stacked.
+            sync_service: if crate::nobd_setup::device_present() {
+                crate::sync_service::SyncService::start(pad_type, sync_src)
+            } else {
+                crate::sync_service::SyncService::stopped()
+            },
             pad_type,
             controller_present: crate::nobd_setup::device_present(),
             setup_msg: None,
             setup_rx: None,
             hide_stick: ui_cfg.hide_stick != 0,
+            game_dir: crate::gameinstall::find_game_dir(),
+            hook_installed: false,
+            hook_msg: None,
+            hb_last: 0,
+            hb_seen_at: None,
+            hb_poll_at: std::time::Instant::now(),
+            game_is_running: false,
             keep_controller: ui_cfg.keep_controller != 0,
             startup_hide_done: false,
             auto_input,
@@ -657,6 +689,39 @@ impl eframe::App for FingerGapApp {
             }
         }
 
+        // Hook liveness + self-install. Polled at ~4 Hz, never per frame: the
+        // install check hashes a 370 KB file and the game check spawns tasklist.
+        if self.hb_poll_at.elapsed() >= std::time::Duration::from_millis(250) {
+            self.hb_poll_at = std::time::Instant::now();
+            let hb = nobd_shared::state()
+                .dll_heartbeat
+                .load(std::sync::atomic::Ordering::Relaxed);
+            if hb != self.hb_last {
+                self.hb_last = hb;
+                self.hb_seen_at = Some(std::time::Instant::now());
+            }
+            self.game_is_running = crate::gameinstall::game_running();
+            if let Some(dir) = self.game_dir.clone() {
+                let current = crate::gameinstall::is_current(&dir);
+                if current != self.hook_installed {
+                    self.hook_installed = current;
+                }
+                // Plug and play: put ourselves in place without being asked.
+                // No elevation involved - Steam grants Users FullControl on its
+                // game folders - so there is nothing to prompt about.
+                if !current && !self.hook_live() && !self.game_is_running {
+                    match crate::gameinstall::ensure_installed(&dir) {
+                        Ok(true) => {
+                            self.hook_installed = true;
+                            self.hook_msg = None;
+                        }
+                        Ok(false) => {}
+                        Err(e) => self.hook_msg = Some(e),
+                    }
+                }
+            }
+        }
+
         // Keep the tray menu's check marks in sync with the live config.
         if let Some(tray) = &self.tray {
             tray.refresh_checks();
@@ -858,6 +923,8 @@ impl FingerGapApp {
         }
 
         egui::CentralPanel::default().show(ctx, |ui| {
+            self.draw_hook_status(ui);
+            ui.add_space(10.0);
             self.draw_hero(ui);
             self.draw_update_note(ui);
             ui.add_space(12.0);
@@ -929,6 +996,80 @@ impl FingerGapApp {
 
     /// B — the hero. Always answers "is it working", and when the answer is no
     /// it also HOLDS the button that fixes it, at the same geometry every time.
+    /// Is the in-game hook running RIGHT NOW? True only while the heartbeat is
+    /// still moving - it goes false a second after the game closes.
+    fn hook_live(&self) -> bool {
+        self.hb_seen_at
+            .is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(1500))
+    }
+
+    /// The whole answer, in the order a player asks it: is Marvel here, is NOBD
+    /// in it, and is it working right now.
+    fn draw_hook_status(&mut self, ui: &mut Ui) {
+        let live = self.hook_live();
+        let (accent, title, body) = match (&self.game_dir, self.hook_installed, live) {
+            (None, _, _) => (
+                NEEDS_YOU,
+                "MARVEL NOT FOUND",
+                "NOBD couldn't find Marvel vs Capcom in your Steam library.".to_owned(),
+            ),
+            // A loaded DLL cannot be replaced, so say so rather than sitting on
+            // "installing" forever while retrying a copy that cannot succeed.
+            (Some(_), false, true) => (
+                LIVE,
+                "NOBD IS LIVE IN MARVEL",
+                "An update is ready. It will be applied next time you close the game.".to_owned(),
+            ),
+            (Some(_), false, false) if self.game_is_running => (
+                NEEDS_YOU,
+                "CLOSE MARVEL TO FINISH",
+                "NOBD has an update for your game folder, and Windows won't let it replace a file the game is using.".to_owned(),
+            ),
+            (Some(_), false, false) => (
+                NEEDS_YOU,
+                "INSTALLING\u{2026}",
+                self.hook_msg
+                    .clone()
+                    .unwrap_or_else(|| "Putting NOBD into your Marvel folder.".to_owned()),
+            ),
+            (Some(_), true, false) => (
+                INK_DIM,
+                "READY \u{2014} LAUNCH MARVEL",
+                "NOBD is installed. It starts with the game; there is nothing to turn on.".to_owned(),
+            ),
+            (Some(_), true, true) => (
+                LIVE,
+                "NOBD IS LIVE IN MARVEL",
+                "Running inside the game. Your dashes are being grouped as you play.".to_owned(),
+            ),
+        };
+
+        egui::Frame::new()
+            .inner_margin(12.0)
+            .corner_radius(10.0)
+            .fill(SURFACE)
+            .stroke(egui::Stroke::new(1.0, HAIRLINE))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    status_dot(ui, accent, live);
+                    ui.add_space(8.0);
+                    ui.label(RichText::new(title).size(20.0).strong().color(INK));
+                });
+                ui.label(RichText::new(body).size(13.0).color(INK_DIM));
+                if let Some(dir) = &self.game_dir {
+                    ui.label(
+                        RichText::new(dir.display().to_string())
+                            .size(10.0)
+                            .color(INK_FAINT),
+                    );
+                }
+                if let Some(m) = &self.hook_msg {
+                    ui.colored_label(NEEDS_YOU, RichText::new(m).size(11.0));
+                }
+            });
+    }
+
     fn draw_hero(&mut self, ui: &mut Ui) {
         use std::sync::atomic::Ordering;
         let phase = self.phase();

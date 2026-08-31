@@ -4,6 +4,7 @@
 mod app;
 mod bulk;
 mod hid;
+mod gameinstall;
 mod hidhide;
 mod input;
 mod logo;
@@ -99,8 +100,30 @@ fn main() -> eframe::Result {
     // handles closed it saw ERROR_ALREADY_EXISTS, returned early, and NOTHING
     // WAS EVER INSTALLED — with no error anywhere. Setup is short-lived and
     // idempotent; it does not need the guard.
-    let is_setup_run = std::env::args().any(|a| a.starts_with("--setup-") || a == "--uninstall" || a == "--eject" || a == "--hid-probe");
+    let is_setup_run = std::env::args().any(|a| a.starts_with("--setup-") || a == "--uninstall" || a == "--eject" || a == "--hid-probe" || a == "--hook-probe");
     if !is_setup_run && !claim_single_instance() {
+        return Ok(());
+    }
+
+    // `--hook-probe`: why is the in-game hook not installing? Dumps every input
+    // the decision depends on, to TEMP as nobd-hookprobe.txt.
+    if std::env::args().any(|a| a == "--hook-probe") {
+        use std::fmt::Write as _;
+        let mut o = String::new();
+        let exe = std::env::current_exe();
+        let _ = writeln!(o, "current_exe : {exe:?}");
+        let _ = writeln!(o, "dll_source  : {:?}", gameinstall::dll_source());
+        let dir = gameinstall::find_game_dir();
+        let _ = writeln!(o, "game_dir    : {dir:?}");
+        let _ = writeln!(o, "game_running: {}", gameinstall::game_running());
+        if let Some(d) = &dir {
+            let _ = writeln!(o, "has_game    : {}", gameinstall::has_game(d));
+            let _ = writeln!(o, "is_installed: {}", gameinstall::is_installed(d));
+            let _ = writeln!(o, "is_current  : {}", gameinstall::is_current(d));
+            let _ = writeln!(o, "ensure      : {:?}", gameinstall::ensure_installed(d));
+            let _ = writeln!(o, "is_current' : {}", gameinstall::is_current(d));
+        }
+        let _ = std::fs::write(std::env::temp_dir().join("nobd-hookprobe.txt"), o);
         return Ok(());
     }
 
