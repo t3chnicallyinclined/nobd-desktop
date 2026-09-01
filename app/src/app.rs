@@ -171,6 +171,11 @@ pub struct FingerGapApp {
     /// Cached: `hidhide::is_installed` stats up to three paths, and it was being
     /// asked during painting.
     hidhide_installed: bool,
+    /// Are we hidden in the tray? Tracked because a hidden window must NOT keep
+    /// asking to be repainted: with nothing to present, the event loop stops
+    /// throttling and spins. Measured at 100% of a core while hidden - and the
+    /// tray is where this app is designed to live.
+    hidden: bool,
     /// Where Marvel lives, if we found it. `None` = not installed on this PC.
     game_dir: Option<std::path::PathBuf>,
     /// Heartbeat tracking. The in-game DLL bumps `dll_heartbeat` on every read,
@@ -305,6 +310,7 @@ impl FingerGapApp {
             setup_rx: None,
             hide_stick: ui_cfg.hide_stick != 0,
             hidhide_installed: crate::hidhide::is_installed(),
+            hidden: false,
             game_dir: {
                 // `enabled` used to be half of the virtual-controller switch, so
                 // anyone who turned that off is carrying enabled=0 into a build
@@ -688,10 +694,16 @@ impl FingerGapApp {
 
 impl eframe::App for FingerGapApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Close button → hide to the tray instead of quitting (Quit is in the menu).
         if ctx.input(|i| i.viewport().close_requested()) {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            // MINIMISE, do not hide. With `Visible(false)` eframe stops calling
+            // update() entirely and still burns 100% of a core - measured, and
+            // present in the shipped v0.6.0 too, so it is eframe's loop spinning
+            // on a window with no surface to present. A minimised window keeps
+            // its surface, so the loop blocks the way it should. `show_window_win32`
+            // in tray.rs already restores from minimised.
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+            self.hidden = true;
         }
 
         // Tray ("Open NOBD" / left-click) asked to show the window — do it here on
@@ -700,16 +712,36 @@ impl eframe::App for FingerGapApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            self.hidden = false;
         }
 
-        // Keep the loop ticking even while hidden so the show flag + tray check
-        // marks are picked up promptly.
-        // ONE repaint schedule. There were three, and the tightest asked for a
-        // full redraw every 1 ms - a ~1000 fps window, which is what pinned a
-        // core and made everything else on screen stutter. The live dot and the
-        // counters are legible at 30 fps; input is read by a background thread,
-        // not by the paint loop, so nothing here needs to be faster.
-        ctx.request_repaint_after(std::time::Duration::from_millis(33));
+        // ONE repaint schedule, and it is adaptive. There were three, and the
+        // tightest asked for a full redraw every 1 ms - a ~1000 fps window,
+        // which pinned a core. 30 fps is right while something is actually
+        // moving (the pulse dot, live counters); redrawing a static screen 30
+        // times a second for hours is just heat.
+        let animating = self.hook_live()
+            || self.sync_service.is_active()
+            || self
+                .proof_pulse
+                .is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(400));
+        if self.hidden {
+            // Ask for NOTHING while hidden. This used to tick deliberately, "so
+            // the show flag and tray check marks are picked up promptly" - but
+            // with no surface to present, the event loop has nothing to block on
+            // and spins at 100% of a core. The tray thread already calls
+            // `ctx.request_repaint()` whenever it changes something or wants the
+            // window back, which is the correct way to wake us.
+        } else {
+            // 10 fps while something is live. The pulse dot and the counters
+            // are perfectly legible at that, and it is a third of the redraw
+            // cost of 30 fps for no visible difference.
+            ctx.request_repaint_after(std::time::Duration::from_millis(if animating {
+                100
+            } else {
+                500
+            }));
+        }
 
         // A background Enable finished — apply its result on the UI thread.
         if let Some(rx) = &self.setup_rx {

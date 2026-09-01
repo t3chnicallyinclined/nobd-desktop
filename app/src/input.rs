@@ -80,7 +80,20 @@ const BOUNCE_THRESHOLD_MS: f64 = 5.0;
 /// separate ticks (Nyquist) and each report is timestamped promptly. Polling
 /// faster buys nothing: the pad makes a new report only once per USB frame, and
 /// we skip ticks where `dwPacketNumber` hasn't advanced.
+/// Poll interval while the player is ACTIVELY pressing things. Half a
+/// millisecond, so a finger gap can be resolved finer than the stick's own
+/// ~1 ms report rate.
 const POLL_INTERVAL: Duration = Duration::from_micros(500);
+
+/// Poll interval when nothing has changed for a while. 2000 Hz is the right rate
+/// to MEASURE a finger gap and completely the wrong rate to sit at while nobody
+/// is touching the stick - it was ~10% of a core, all day, for nothing. Any
+/// input snaps straight back to POLL_INTERVAL, so measurement fidelity is
+/// unchanged exactly when it matters.
+const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(8);
+
+/// How long the stick must be quiet before backing off.
+const IDLE_AFTER: Duration = Duration::from_secs(2);
 /// Analog trigger over this (0–255) counts as a digital press.
 const TRIGGER_THRESHOLD: u8 = 30;
 /// XInput exposes 4 controller slots.
@@ -315,6 +328,7 @@ impl GamepadInput {
             let mut last_name_check = Instant::now() - Duration::from_secs(10);
             // Report-rate measurement: smallest gap between consecutive reports.
             let mut last_change: Option<Instant> = None;
+            let mut last_activity = Instant::now();
             let mut min_interval_ms = f64::INFINITY;
 
             loop {
@@ -378,6 +392,9 @@ impl GamepadInput {
 
                     let changed = mask ^ last_mask[slot];
                     if changed != 0 {
+                        // Any edge means the player is playing: hold the loop at
+                        // full measurement rate.
+                        last_activity = Instant::now();
                         for &(bit, button) in XINPUT_BUTTONS {
                             if changed & bit != 0 {
                                 let msg = if mask & bit != 0 {
@@ -407,7 +424,12 @@ impl GamepadInput {
                     last_name_check = Instant::now();
                 }
 
-                thread::sleep(POLL_INTERVAL);
+                // Adaptive: fast while there is something to measure, idle
+                // otherwise. `last_activity` is bumped wherever a button edge is
+                // seen, so the first press of a session pays at most one idle
+                // tick before the loop is back at full rate.
+                let idle = last_activity.elapsed() >= IDLE_AFTER;
+                thread::sleep(if idle { IDLE_POLL_INTERVAL } else { POLL_INTERVAL });
             }
     }
 
