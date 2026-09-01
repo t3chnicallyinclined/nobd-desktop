@@ -79,6 +79,9 @@ Section "NOBD Desktop" SecMain
   SectionIn RO
   SetOutPath "$INSTDIR"
   File "${PAYLOAD}\${EXENAME}"
+  ; The in-game hook. The app copies this into the game folder itself, so it
+  ; MUST sit next to nobd.exe - `gameinstall::dll_source` looks there.
+  File "${PAYLOAD}\DINPUT8.dll"
   File "${PAYLOAD}\README.txt"
   File "${PAYLOAD}\gamecontrollerdb.txt"
 
@@ -131,6 +134,7 @@ Section "Uninstall"
   ${EndIf}
 
   Delete "$INSTDIR\${EXENAME}"
+  Delete "$INSTDIR\DINPUT8.dll"
   Delete "$INSTDIR\README.txt"
   Delete "$INSTDIR\gamecontrollerdb.txt"
   Delete "$INSTDIR\uninstall.exe"

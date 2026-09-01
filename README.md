@@ -32,70 +32,82 @@ NOBD Desktop watches the game's input read: when it catches a lone attack, it ch
 
 ## How it works
 
-NOBD adds a **virtual controller** to Windows — the *NOBD Controller* — reads your real stick, and gives the game the grouped result. There is no DLL to copy into a game folder and nothing is injected into any process; it works in every game, not just one.
+NOBD runs **inside the game**. Marvel already loads `DINPUT8.dll`, so NOBD ships
+a drop-in replacement that forwards everything to the real one and, on the way
+past, groups your near-simultaneous attack presses. Nothing is injected, no
+driver is installed, and no extra controller appears anywhere.
 
 ```
-   your stick  ──▶  nobd.exe  ──▶  NOBD Controller  ──▶  your game
-                    (sync window)   (virtual pad Windows
-                                     and Steam can see)
+   your stick  ──▶  the game reads it  ──▶  NOBD groups the presses  ──▶  the game
+                                            (a few instructions, in-path)
 ```
 
-A background **~1 kHz loop** reads your stick and runs the sync window on its own fine clock, exactly like the controller firmware does. When it catches a lone attack it holds it for at most the window; if a partner arrives inside that window, **both leave in one report**, so the game physically cannot read one without the other. Directions are never delayed, so motion tech (fast fly / refly, triangle dashing, wavedashes) stays frame-tight.
+Because it works on the **game's** side of the boundary rather than the device's,
+it does not care what your stick is:
+
+| your stick | how the game sees it | covered |
+|---|---|---|
+| Xbox / XInput pad | `XInputGetState` | yes |
+| DirectInput stick | `GetDeviceState` | yes |
+| PS4 / PS5 pad | Steam Input presents an Xbox pad | yes |
+
+No mode switch, no hiding your stick, no picking a device in-game.
+
+A background ~1 kHz thread runs the sync window on its own fine clock, exactly
+like the controller firmware; the game's read samples the already-committed
+result and **never waits on us**. That matters for online: NOBD changes the
+inputs the game reads *before* it captures them for the frame, so both clients
+serialise and simulate the same inputs — the same thing a hardware NOBD stick
+does. It never stalls the game thread.
 
 ### The contract
 
-NOBD changes **when** an edge reports. It never changes **which** buttons report, and never **how long** you held them.
+NOBD changes **when** an edge reports. It never changes **which** buttons report,
+and never **how long** you held them.
 
-- A press is held for at most the window, and is delivered early the moment two attacks are held — nothing left to wait for, so no added delay.
-- **A press is never deleted.** A tap shorter than the window is still delivered, shifted later.
-- **Pulse width is preserved.** A release is delayed by the same amount its press was, so a 40 ms hold reaches the game as a 40 ms hold.
+- A press is held for at most the window, and is delivered early the moment two
+  attacks are held — nothing left to wait for, so no added delay.
+- **A press is never deleted.** A tap shorter than the window still lands.
+- **Pulse width is preserved.** A release is delayed by the same amount its press
+  was, so a 40 ms hold reaches the game as a 40 ms hold.
 
-The same window runs in three places from one implementation (`shared/src/sync_window.rs`): the Windows app, the Linux daemon (`nobdd`), and the UMDF HID filter. The C++ port is kept behaviour-identical by a parity test suite.
-
-### Input sources
-
-| Source | When it's used |
-|---|---|
-| **XInput** | Xbox pads and anything Windows presents as one. The default. |
-| **DirectInput** | A stick Windows does not expose to XInput — chosen automatically, overridable under Details. |
-| **NOBD Bulk** | A NOBD stick streaming over WinUSB (~10 kHz) instead of its USB poll. Auto-detected. |
+The same window runs in the app, the Linux daemon (`nobdd`) and the UMDF HID
+filter from one implementation (`shared/src/sync_window.rs`), covered by 18 tests
+plus a C++ parity suite.
 
 ---
 
 ## Install / Use
 
-1. Download **`NOBD-Desktop-Setup-x.y.z.exe`** and run it. (A portable ZIP is also attached if you prefer — keep `nobd.exe` and the `driver/` folder together.)
-2. Open NOBD and click **Install NOBD Controller**. Windows asks for admin once — this adds a small signed driver and the virtual controller. The app tells you exactly what it installs before you click.
-3. In your game's controller settings, select **"NOBD Controller (Xbox 360)"**. Nothing changes in-game until you do.
+1. Download **`NOBD-Desktop-Setup-x.y.z.exe`** and run it.
+2. Open NOBD. It finds Marvel and installs itself into the game folder — no admin
+   prompt, nothing to configure.
+3. Launch Marvel and play.
 
-That's it. The controller stays in Windows after a restart, so it keeps working without opening the app. Tick **Start with Windows** if you want the tray app back at login too.
+The app shows whether NOBD is in the game and whether it is working right now.
+Press two punches together and it tells you how many landed together, how far
+apart your fingers actually were, and how many would have split across a frame
+without it.
 
-The app answers one question on its front screen: **are your dashes coming out?** Press two punches together and it tells you how many landed together, how far apart your fingers actually were, and how many would have split across a frame without it.
-
-**Removing it:** uninstall *NOBD Desktop* from Add/Remove Programs. That removes everything it added — the controller, the driver package, the signing certificate, the logon task — and un-hides your stick. To drop just the virtual controller and keep NOBD installed, use *Details → Remove NOBD Controller*.
-
----
-
-## The app
-
-- **One screen** — the sync switch, the window, and a live answer to "is it working".
-- **Every two-button press** is listed as *what your hands did → what the game got*, so the before/after is visible while you play.
-- **Details** — your finger-gap breakdown, the event log, input/output overrides, and removal.
+**Removing it:** uninstall *NOBD Desktop* from Add/Remove Programs.
 
 ---
 
 ## What the numbers mean
 
-Everything on the front screen is measured **inside the sync loop**, so it is true on every input source — including NOBD Bulk, where Windows does not see your stick as a controller at all.
+While you play, everything is measured **inside the game**, where NOBD can see
+the game's real read cadence.
 
 | Number | What it means |
 |---|---|
-| **dashes landed** | Two-button presses NOBD delivered in one report. The game cannot split these — the risk is exactly zero, at any timing. |
-| **dropped** | Two-button presses that did not land together. If this is climbing, the window is tighter than your hands; the app offers you a wider one. |
-| **saved by NOBD** | How many of the grouped presses would have split across a 60 Hz frame unaided. An expectation (`gap ÷ 16.67 ms`) summed over your presses, not a count of events — we cannot see the game's clock, so this is the odds, honestly labelled. |
-| **your fingers, apart** | The raw gap between your two presses, measured before the window touches it. |
+| **dashes landed** | Two-button presses delivered in one report. The game cannot split these — the risk is exactly zero, at any timing. |
+| **dropped** | Two-button presses that did not land together. If this climbs, the window is tighter than your hands, and the app offers you a wider one. |
+| **saved by NOBD** | How many would have split across a 60 Hz frame unaided. |
+| **your fingers, apart** | Your raw gap, measured before the window touches it. |
 
-The event log's right-hand column shows the odds a 60 Hz game splits each press — *about 1 in 5* rather than a percentage. Where the answer is certain it says so: *always safe*, or *drops every time*.
+The event log shows each press as *what your hands did → what the game got*, with
+the odds a 60 Hz game splits it — *about 1 in 5* rather than a percentage. Where
+the answer is certain it says so: *always safe*, or *drops every time*.
 
 ---
 
