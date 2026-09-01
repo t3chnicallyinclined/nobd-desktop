@@ -82,33 +82,57 @@ pub fn is_installed(game_dir: &Path) -> bool {
 pub fn is_current(game_dir: &Path) -> bool {
     let Some(src) = dll_source() else { return false };
     let dst = game_dir.join(DLL);
-    match (std::fs::metadata(&src), std::fs::metadata(&dst)) {
-        (Ok(a), Ok(b)) if a.len() == b.len() => {
-            matches!((std::fs::read(&src), std::fs::read(&dst)), (Ok(x), Ok(y)) if x == y)
-        }
-        _ => false,
+    let (Ok(a), Ok(b)) = (std::fs::metadata(&src), std::fs::metadata(&dst)) else {
+        return false;
+    };
+    if a.len() != b.len() {
+        return false;
     }
+    // Same size AND same mtime is our own copy, which is the overwhelmingly
+    // common case. Only fall through to reading 742 KB when that is in doubt -
+    // this used to hash both files unconditionally, four times a second.
+    if let (Ok(ta), Ok(tb)) = (a.modified(), b.modified()) {
+        if ta == tb {
+            return true;
+        }
+    }
+    matches!((std::fs::read(&src), std::fs::read(&dst)), (Ok(x), Ok(y)) if x == y)
 }
 
 /// Is the game running right now? Used to explain why an update cannot be
 /// applied yet - a loaded DLL cannot be replaced.
 pub fn game_running() -> bool {
-    use std::os::windows::process::CommandExt;
-    // NOT `tasklist /FI "IMAGENAME eq ..."`: that filter does not match this
-    // game's 36-character executable name, so it reported "not running" while
-    // the game was demonstrably running - and the caller then retried a copy
-    // that can never succeed against a loaded DLL, forever.
-    //
-    // Take the raw list and match a prefix ourselves, since tasklist truncates
-    // the image name it prints.
-    let stem: String = GAME_EXE.trim_end_matches(".exe").chars().take(20).collect();
-    let stem = stem.to_ascii_lowercase();
-    std::process::Command::new("tasklist")
-        .args(["/NH", "/FO", "CSV"])
-        .creation_flags(0x0800_0000)
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).to_ascii_lowercase().contains(&stem))
-        .unwrap_or(false)
+    // Snapshot the process list in-process. This used to shell out to
+    // `tasklist`, which spawns a process that walks every process on the
+    // machine - called four times a second from the UI thread, it stalled the
+    // whole app and made input logging visibly lag.
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
+    let want = GAME_EXE.to_ascii_lowercase();
+    unsafe {
+        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snap == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
+            return false;
+        }
+        let mut e: PROCESSENTRY32W = std::mem::zeroed();
+        e.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+        let mut ok = Process32FirstW(snap, &mut e) != 0;
+        let mut found = false;
+        while ok {
+            let n = e.szExeFile.iter().position(|&c| c == 0).unwrap_or(0);
+            let name = String::from_utf16_lossy(&e.szExeFile[..n]).to_ascii_lowercase();
+            if name == want {
+                found = true;
+                break;
+            }
+            ok = Process32NextW(snap, &mut e) != 0;
+        }
+        CloseHandle(snap);
+        found
+    }
 }
 
 /// Put the current DLL in place if it is missing or stale. Returns Ok(true) when
@@ -141,8 +165,18 @@ pub fn install(game_dir: &Path) -> Result<(), String> {
         return Err(format!("{GAME_EXE} not found in that folder."));
     }
     let src = dll_source().ok_or_else(|| format!("{DLL} not found next to nobd.exe."))?;
-    std::fs::copy(&src, game_dir.join(DLL))
+    let dst = game_dir.join(DLL);
+    std::fs::copy(&src, &dst)
         .map_err(|e| format!("Copy failed (is the game running?): {e}"))?;
+    // Carry the source mtime across so `is_current` can answer from metadata
+    // instead of re-reading both files.
+    if let Ok(md) = std::fs::metadata(&src) {
+        if let Ok(t) = md.modified() {
+            if let Ok(f) = std::fs::OpenOptions::new().write(true).open(&dst) {
+                let _ = f.set_modified(t);
+            }
+        }
+    }
     Ok(())
 }
 

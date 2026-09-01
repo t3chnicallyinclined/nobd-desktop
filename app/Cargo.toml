@@ -32,6 +32,9 @@ windows-sys = { version = "0.52", features = [
     "Win32_Security",
     "Win32_System_IO",
     "Win32_System_Threading",
+    # CreateToolhelp32Snapshot: check whether the game is running without
+    # spawning tasklist on the UI thread.
+    "Win32_System_Diagnostics_ToolHelp",
     "Win32_UI_Shell",
 ] }
 

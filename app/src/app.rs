@@ -83,6 +83,55 @@ fn flow_arrow(ui: &mut Ui) {
         .line_segment([c + egui::vec2(2.0, 0.0), c + egui::vec2(-4.0, 4.0)], st);
 }
 
+/// Everything about the in-game hook that costs real work to determine.
+/// Written by one background thread, read by the UI for free.
+pub struct HookState {
+    /// Our current DLL is in the game folder.
+    installed: std::sync::atomic::AtomicBool,
+    /// Marvel is running (so a loaded DLL cannot be replaced).
+    running: std::sync::atomic::AtomicBool,
+    /// Last install error, if any.
+    msg: std::sync::Mutex<Option<String>>,
+}
+
+impl HookState {
+    fn spawn() -> std::sync::Arc<Self> {
+        let me = std::sync::Arc::new(HookState {
+            installed: std::sync::atomic::AtomicBool::new(false),
+            running: std::sync::atomic::AtomicBool::new(false),
+            msg: std::sync::Mutex::new(None),
+        });
+        let worker = me.clone();
+        std::thread::spawn(move || {
+            use std::sync::atomic::Ordering;
+            let dir = crate::gameinstall::find_game_dir();
+            loop {
+                let running = crate::gameinstall::game_running();
+                worker.running.store(running, Ordering::Relaxed);
+                if let Some(d) = &dir {
+                    let current = crate::gameinstall::is_current(d);
+                    worker.installed.store(current, Ordering::Relaxed);
+                    // Plug and play: put ourselves in place without being asked.
+                    // Needs no elevation - Steam grants Users FullControl on its
+                    // game folders - so there is nothing to prompt about.
+                    if !current && !running {
+                        match crate::gameinstall::ensure_installed(d) {
+                            Ok(true) => {
+                                worker.installed.store(true, Ordering::Relaxed);
+                                *worker.msg.lock().unwrap() = None;
+                            }
+                            Ok(false) => {}
+                            Err(e) => *worker.msg.lock().unwrap() = Some(e),
+                        }
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1000));
+            }
+        });
+        me
+    }
+}
+
 pub struct FingerGapApp {
     input: Option<GamepadInput>,
     // Per-controller finger-gap stats / counts (index = controller slot).
@@ -91,7 +140,7 @@ pub struct FingerGapApp {
     bounce_counts: Vec<usize>,
     // Monotonic chords per controller (the log's "#N", independent of the window).
     total_pairs: Vec<usize>,
-    gap_log: Vec<GapLogEntry>,
+    gap_log: std::collections::VecDeque<GapLogEntry>,
     error_msg: Option<String>,
     tray: Option<crate::tray::Tray>,
     last_cfg: crate::persist::Cfg,
@@ -119,13 +168,11 @@ pub struct FingerGapApp {
     /// Hide the physical stick from games via HidHide (HID source only), so only
     /// the NOBD Controller shows up in Steam.
     hide_stick: bool,
+    /// Cached: `hidhide::is_installed` stats up to three paths, and it was being
+    /// asked during painting.
+    hidhide_installed: bool,
     /// Where Marvel lives, if we found it. `None` = not installed on this PC.
     game_dir: Option<std::path::PathBuf>,
-    /// Is OUR current DINPUT8.dll in that folder? Byte-compared, not merely
-    /// present - a stale build is worse than none (see gameinstall::is_current).
-    hook_installed: bool,
-    /// Last problem from the auto-install, shown verbatim.
-    hook_msg: Option<String>,
     /// Heartbeat tracking. The in-game DLL bumps `dll_heartbeat` on every read,
     /// so a value that MOVED since we last looked means the hook is live in a
     /// running game. A value that is merely non-zero proves nothing - it
@@ -133,10 +180,14 @@ pub struct FingerGapApp {
     hb_last: u64,
     hb_seen_at: Option<std::time::Instant>,
     hb_poll_at: std::time::Instant,
-    /// Is Marvel running? Cached from the same 4 Hz poll as the heartbeat -
-    /// answering it costs a `tasklist` spawn, so it must never be asked during
-    /// painting.
-    game_is_running: bool,
+    /// Hook state, computed on a BACKGROUND thread and published here.
+    ///
+    /// It used to be computed inline in `update()` at 4 Hz, which meant a
+    /// `tasklist` process spawn and a 742 KB file comparison on the render
+    /// thread several times a second. That stalled the app and made the input
+    /// log visibly lag. Nothing in the paint path may touch the filesystem or
+    /// spawn anything.
+    hook_state: std::sync::Arc<HookState>,
     /// The old virtual-controller stack is still installed. Checked once at
     /// startup - it walks the DriverStore and spawns schtasks.
     legacy_present: bool,
@@ -232,7 +283,7 @@ impl FingerGapApp {
             stray_counts: Vec::new(),
             bounce_counts: Vec::new(),
             total_pairs: Vec::new(),
-            gap_log: Vec::new(),
+            gap_log: std::collections::VecDeque::new(),
             error_msg,
             tray: crate::tray::spawn(ctx.clone()),
             last_cfg,
@@ -253,6 +304,7 @@ impl FingerGapApp {
             setup_msg: None,
             setup_rx: None,
             hide_stick: ui_cfg.hide_stick != 0,
+            hidhide_installed: crate::hidhide::is_installed(),
             game_dir: {
                 // `enabled` used to be half of the virtual-controller switch, so
                 // anyone who turned that off is carrying enabled=0 into a build
@@ -270,12 +322,11 @@ impl FingerGapApp {
                 }
                 d
             },
-            hook_installed: false,
-            hook_msg: None,
+            hook_state: HookState::spawn(),
             hb_last: 0,
             hb_seen_at: None,
             hb_poll_at: std::time::Instant::now(),
-            game_is_running: false,
+
             legacy_present: crate::nobd_setup::legacy_stack_present(),
             legacy_dismissed: false,
             keep_controller: ui_cfg.keep_controller != 0,
@@ -625,9 +676,11 @@ impl FingerGapApp {
     }
 
     fn push_log(&mut self, entry: GapLogEntry) {
-        self.gap_log.push(entry);
+        // VecDeque: `Vec::remove(0)` shifted the whole 500-entry buffer on every
+        // press once it filled.
+        self.gap_log.push_back(entry);
         if self.gap_log.len() > LOG_MAX {
-            self.gap_log.remove(0);
+            self.gap_log.pop_front();
         }
     }
 
@@ -651,7 +704,12 @@ impl eframe::App for FingerGapApp {
 
         // Keep the loop ticking even while hidden so the show flag + tray check
         // marks are picked up promptly.
-        ctx.request_repaint_after(std::time::Duration::from_millis(50));
+        // ONE repaint schedule. There were three, and the tightest asked for a
+        // full redraw every 1 ms - a ~1000 fps window, which is what pinned a
+        // core and made everything else on screen stutter. The live dot and the
+        // counters are legible at 30 fps; input is read by a background thread,
+        // not by the paint loop, so nothing here needs to be faster.
+        ctx.request_repaint_after(std::time::Duration::from_millis(33));
 
         // A background Enable finished — apply its result on the UI thread.
         if let Some(rx) = &self.setup_rx {
@@ -716,32 +774,14 @@ impl eframe::App for FingerGapApp {
         // install check hashes a 370 KB file and the game check spawns tasklist.
         if self.hb_poll_at.elapsed() >= std::time::Duration::from_millis(250) {
             self.hb_poll_at = std::time::Instant::now();
+            // Atomic loads only. Everything expensive lives on HookState's
+            // worker thread; the paint path must never touch the filesystem.
             let hb = nobd_shared::state()
                 .dll_heartbeat
                 .load(std::sync::atomic::Ordering::Relaxed);
             if hb != self.hb_last {
                 self.hb_last = hb;
                 self.hb_seen_at = Some(std::time::Instant::now());
-            }
-            self.game_is_running = crate::gameinstall::game_running();
-            if let Some(dir) = self.game_dir.clone() {
-                let current = crate::gameinstall::is_current(&dir);
-                if current != self.hook_installed {
-                    self.hook_installed = current;
-                }
-                // Plug and play: put ourselves in place without being asked.
-                // No elevation involved - Steam grants Users FullControl on its
-                // game folders - so there is nothing to prompt about.
-                if !current && !self.hook_live() && !self.game_is_running {
-                    match crate::gameinstall::ensure_installed(&dir) {
-                        Ok(true) => {
-                            self.hook_installed = true;
-                            self.hook_msg = None;
-                        }
-                        Ok(false) => {}
-                        Err(e) => self.hook_msg = Some(e),
-                    }
-                }
             }
         }
 
@@ -811,7 +851,6 @@ impl eframe::App for FingerGapApp {
             }
         }
 
-        ctx.request_repaint_after(std::time::Duration::from_millis(1));
 
         // === TOP BAR ===
         egui::TopBottomPanel::top("header").show(ctx, |ui| {
@@ -835,8 +874,7 @@ impl eframe::App for FingerGapApp {
             self.last_cfg = cfg;
         }
 
-        // Repaint continuously so live status / gamepad input stay current.
-        ctx.request_repaint_after(std::time::Duration::from_millis(50));
+
     }
 }
 
@@ -1029,7 +1067,7 @@ impl FingerGapApp {
     /// is not just unnecessary, it is the thing that puts a second identical
     /// Xbox pad in Steam - so its whole UI comes off the screen.
     fn hook_is_path(&self) -> bool {
-        self.game_dir.is_some() && self.hook_installed
+        self.game_dir.is_some() && self.hook_state.installed.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Is the in-game hook running RIGHT NOW? True only while the heartbeat is
@@ -1043,7 +1081,7 @@ impl FingerGapApp {
     /// in it, and is it working right now.
     fn draw_hook_status(&mut self, ui: &mut Ui) {
         let live = self.hook_live();
-        let (accent, title, body) = match (&self.game_dir, self.hook_installed, live) {
+        let (accent, title, body) = match (&self.game_dir, self.hook_state.installed.load(std::sync::atomic::Ordering::Relaxed), live) {
             (None, _, _) => (
                 NEEDS_YOU,
                 "MARVEL NOT FOUND",
@@ -1056,7 +1094,7 @@ impl FingerGapApp {
                 "NOBD IS LIVE IN MARVEL",
                 "An update is ready. It will be applied next time you close the game.".to_owned(),
             ),
-            (Some(_), false, false) if self.game_is_running => (
+            (Some(_), false, false) if self.hook_state.running.load(std::sync::atomic::Ordering::Relaxed) => (
                 NEEDS_YOU,
                 "CLOSE MARVEL TO FINISH",
                 "NOBD has an update for your game folder, and Windows won't let it replace a file the game is using.".to_owned(),
@@ -1064,8 +1102,11 @@ impl FingerGapApp {
             (Some(_), false, false) => (
                 NEEDS_YOU,
                 "INSTALLING\u{2026}",
-                self.hook_msg
-                    .clone()
+                self.hook_state
+                    .msg
+                    .lock()
+                    .ok()
+                    .and_then(|m| m.clone())
                     .unwrap_or_else(|| "Putting NOBD into your Marvel folder.".to_owned()),
             ),
             // Never claim READY while presses are passing straight through.
@@ -1113,7 +1154,7 @@ impl FingerGapApp {
                             .color(INK_FAINT),
                     );
                 }
-                if let Some(m) = &self.hook_msg {
+                if let Some(m) = self.hook_state.msg.lock().ok().and_then(|m| m.clone()).as_ref() {
                     ui.colored_label(NEEDS_YOU, RichText::new(m).size(11.0));
                 }
             });
@@ -1467,7 +1508,7 @@ impl FingerGapApp {
                                 .size(11.0)
                                 .color(NEEDS_YOU),
                         );
-                        if !crate::hidhide::is_installed()
+                        if !self.hidhide_installed
                             && ui.button(RichText::new("Hide my stick").size(11.0)).clicked()
                         {
                             if let Err(e) = crate::hidhide::run_installer() {
@@ -1486,7 +1527,12 @@ impl FingerGapApp {
         let st = nobd_shared::state();
         let window_ms = st.window_ms[0].load(std::sync::atomic::Ordering::Relaxed).clamp(1, 16) as f64;
         // Passthrough when sync is off - the after-column must say so.
-        let sync_on = self.controller_present && st.enabled.load(std::sync::atomic::Ordering::Relaxed) != 0;
+        // Sync is running if EITHER path is carrying it. This used to test
+        // `controller_present` alone, which is false by design once the hook is
+        // the path - so every row said "NOBD off" while the card above it
+        // correctly said NOBD IS LIVE IN MARVEL.
+        let sync_on = (self.controller_present || self.hook_is_path())
+            && st.enabled.load(std::sync::atomic::Ordering::Relaxed) != 0;
 
         // Before and after, on the same row. Two separate readouts made the app
         // look like it was reporting a finger gap it had failed to close.
@@ -1505,22 +1551,28 @@ impl FingerGapApp {
             .show(ui, |ui| {
                 ui.set_min_height(h);
                 ui.set_width(ui.available_width());
+                // Virtualised. `.show()` LAYS OUT every row and merely clips what
+                // you cannot see, so a full 500-entry log meant thousands of
+                // widget layouts per frame - which is what made the app stutter
+                // while logging presses. `show_rows` builds only the visible band.
+                let rows: Vec<&GapLogEntry> = self
+                    .gap_log
+                    .iter()
+                    .rev()
+                    .filter(|e| Some(log_entry_slot(e)) != nobd_slot)
+                    .collect();
+                let row_h = ui.text_style_height(&egui::TextStyle::Monospace)
+                    + ui.spacing().item_spacing.y;
                 ScrollArea::vertical()
                     .id_salt("tape")
                     .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        let mut any = false;
-                        for e in self
-                            .gap_log
-                            .iter()
-                            .rev()
-                            .filter(|e| Some(log_entry_slot(e)) != nobd_slot)
-                        {
-                            render_log_entry(ui, e, window_ms, sync_on);
-                            any = true;
-                        }
-                        if !any {
+                    .show_rows(ui, row_h, rows.len(), |ui, range| {
+                        if rows.is_empty() {
                             ui.label(RichText::new("Nothing yet.").size(11.0).color(INK_FAINT));
+                            return;
+                        }
+                        for e in &rows[range] {
+                            render_log_entry(ui, e, window_ms, sync_on);
                         }
                     });
             });
@@ -1747,7 +1799,7 @@ impl FingerGapApp {
                     self.persist_ui();
                 }
 
-                if self.source_kind == SourceKind::Hid && crate::hidhide::is_installed() {
+                if self.source_kind == SourceKind::Hid && self.hidhide_installed {
                     let mut hide = self.hide_stick;
                     if ui.checkbox(&mut hide, RichText::new("Hide my stick from games (show only NOBD Controller)").size(12.0)).changed() {
                         self.hide_stick = hide;
@@ -1996,8 +2048,10 @@ fn render_log_entry(ui: &mut Ui, e: &GapLogEntry, window_ms: f64, sync_on: bool)
                             .color(INK_DIM),
                     );
                 }
+                // The raw gap, as context for the verdict. This slot used to
+                // repeat the button names already shown on the left.
                 ui.monospace(
-                    RichText::new(format!("  {button_a}+{button_b}{chord}")).color(INK_FAINT),
+                    RichText::new(format!("   {gap_ms:>4.1} ms apart")).color(INK_FAINT),
                 );
             });
         }
