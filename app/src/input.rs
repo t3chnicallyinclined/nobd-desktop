@@ -94,6 +94,16 @@ const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(8);
 
 /// How long the stick must be quiet before backing off.
 const IDLE_AFTER: Duration = Duration::from_secs(2);
+
+/// Suspend the reader entirely.
+///
+/// Set while the game is running. This thread exists to measure your finger gap
+/// for the tester; during play the in-game hook measures the same thing from
+/// inside the game, where it can also see the game's real reads. Polling
+/// XInput at 2 kHz alongside the game is not just redundant work, it is a
+/// SECOND consumer of XInputGetState competing with the game's own input reads -
+/// during the one activity where latency is the entire point.
+pub static SUSPENDED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// Analog trigger over this (0–255) counts as a digital press.
 const TRIGGER_THRESHOLD: u8 = 30;
 /// XInput exposes 4 controller slots.
@@ -332,6 +342,10 @@ impl GamepadInput {
             let mut min_interval_ms = f64::INFINITY;
 
             loop {
+                if SUSPENDED.load(std::sync::atomic::Ordering::Relaxed) {
+                    thread::sleep(Duration::from_millis(250));
+                    continue;
+                }
                 // One timestamp per tick: transitions from the same USB report
                 // (same poll) share it, so co-pressed buttons read a 0 ms gap.
                 let now = Instant::now();
@@ -428,6 +442,10 @@ impl GamepadInput {
                 // otherwise. `last_activity` is bumped wherever a button edge is
                 // seen, so the first press of a session pays at most one idle
                 // tick before the loop is back at full rate.
+                if SUSPENDED.load(std::sync::atomic::Ordering::Relaxed) {
+                    thread::sleep(Duration::from_millis(250));
+                    continue;
+                }
                 let idle = last_activity.elapsed() >= IDLE_AFTER;
                 thread::sleep(if idle { IDLE_POLL_INTERVAL } else { POLL_INTERVAL });
             }

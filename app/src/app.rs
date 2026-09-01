@@ -108,6 +108,10 @@ impl HookState {
             loop {
                 let running = crate::gameinstall::game_running();
                 worker.running.store(running, Ordering::Relaxed);
+                // While the game is up, the hook owns the measuring. Stand the
+                // app's own 2 kHz XInput reader down so it stops competing with
+                // the game for the same API.
+                crate::input::SUSPENDED.store(running, Ordering::Relaxed);
                 if let Some(d) = &dir {
                     let current = crate::gameinstall::is_current(d);
                     worker.installed.store(current, Ordering::Relaxed);
@@ -125,7 +129,13 @@ impl HookState {
                         }
                     }
                 }
-                std::thread::sleep(std::time::Duration::from_millis(1000));
+                // Nothing this loop can act on while the game holds the DLL,
+                // so check far less often.
+                std::thread::sleep(std::time::Duration::from_millis(if running {
+                    5000
+                } else {
+                    1000
+                }));
             }
         });
         me
