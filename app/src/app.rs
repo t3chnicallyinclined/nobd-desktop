@@ -85,6 +85,11 @@ fn flow_arrow(ui: &mut Ui) {
 
 /// Everything about the in-game hook that costs real work to determine.
 /// Written by one background thread, read by the UI for free.
+/// Is the window put away? Shared so the hook worker can decide whether the
+/// tester's reader is worth running.
+pub static WINDOW_HIDDEN: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 pub struct HookState {
     /// Our current DLL is in the game folder.
     installed: std::sync::atomic::AtomicBool,
@@ -108,10 +113,13 @@ impl HookState {
             loop {
                 let running = crate::gameinstall::game_running();
                 worker.running.store(running, Ordering::Relaxed);
-                // While the game is up, the hook owns the measuring. Stand the
-                // app's own 2 kHz XInput reader down so it stops competing with
-                // the game for the same API.
-                crate::input::SUSPENDED.store(running, Ordering::Relaxed);
+                // Stand the app's 2 kHz reader down only when the game is up
+                // AND nobody is looking at the tester. With the window open the
+                // user wants it working, game or no game.
+                crate::input::SUSPENDED.store(
+                    running && WINDOW_HIDDEN.load(Ordering::Relaxed),
+                    Ordering::Relaxed,
+                );
                 if let Some(d) = &dir {
                     let current = crate::gameinstall::is_current(d);
                     worker.installed.store(current, Ordering::Relaxed);
@@ -713,7 +721,11 @@ impl eframe::App for FingerGapApp {
             // its surface, so the loop blocks the way it should. `show_window_win32`
             // in tray.rs already restores from minimised.
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+            // Minimise AND drop the taskbar button, so X really does put it away
+            // to the tray - without the 100%-of-a-core spin that hiding causes.
+            crate::tray::set_taskbar_button(false);
             self.hidden = true;
+            WINDOW_HIDDEN.store(true, std::sync::atomic::Ordering::Relaxed);
         }
 
         // Tray ("Open NOBD" / left-click) asked to show the window — do it here on
@@ -722,7 +734,11 @@ impl eframe::App for FingerGapApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            crate::tray::set_taskbar_button(true);
             self.hidden = false;
+            WINDOW_HIDDEN.store(false, std::sync::atomic::Ordering::Relaxed);
+            // Resume immediately rather than waiting for the worker's next tick.
+            crate::input::SUSPENDED.store(false, std::sync::atomic::Ordering::Relaxed);
         }
 
         // ONE repaint schedule, and it is adaptive. There were three, and the

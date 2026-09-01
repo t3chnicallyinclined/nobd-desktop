@@ -29,6 +29,38 @@ fn show_window_win32() {
         }
     }
 }
+/// Take the window out of (or back into) the taskbar.
+///
+/// A tray app should vanish from the taskbar when you close it - but making the
+/// window INVISIBLE is exactly what sends eframe's event loop spinning at 100%
+/// of a core, because there is no surface to present and nothing to block on.
+///
+/// So we minimise and strip the taskbar button instead. Windows reports a
+/// minimised window as VISIBLE (`IsWindowVisible` is true while `IsIconic` is
+/// also true), so the loop keeps blocking normally - measured at ~1% - while
+/// `WS_EX_TOOLWINDOW` removes the button. Restoring puts `WS_EX_APPWINDOW` back
+/// so the window behaves like a normal one again.
+pub fn set_taskbar_button(show: bool) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        FindWindowW, GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, WS_EX_APPWINDOW,
+        WS_EX_TOOLWINDOW,
+    };
+    let title: Vec<u16> = "NOBD Desktop".encode_utf16().chain(std::iter::once(0)).collect();
+    unsafe {
+        let hwnd = FindWindowW(std::ptr::null(), title.as_ptr());
+        if hwnd == 0 {
+            return;
+        }
+        let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
+        let ex = if show {
+            (ex & !WS_EX_TOOLWINDOW) | WS_EX_APPWINDOW
+        } else {
+            (ex | WS_EX_TOOLWINDOW) & !WS_EX_APPWINDOW
+        };
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex as isize);
+    }
+}
+
 use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 

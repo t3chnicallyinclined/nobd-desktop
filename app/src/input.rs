@@ -97,12 +97,15 @@ const IDLE_AFTER: Duration = Duration::from_secs(2);
 
 /// Suspend the reader entirely.
 ///
-/// Set while the game is running. This thread exists to measure your finger gap
-/// for the tester; during play the in-game hook measures the same thing from
-/// inside the game, where it can also see the game's real reads. Polling
-/// XInput at 2 kHz alongside the game is not just redundant work, it is a
-/// SECOND consumer of XInputGetState competing with the game's own input reads -
-/// during the one activity where latency is the entire point.
+/// Set only when the game is running AND the window is put away. This thread
+/// exists to measure your finger gap for the tester; while you are playing and
+/// not looking at it, the in-game hook measures the same thing from inside the
+/// game, and polling XInput at 2 kHz alongside the game stands up a SECOND
+/// consumer of XInputGetState competing with the game's own reads.
+///
+/// But if the window is OPEN the user is looking at the tester and wants it to
+/// work, game or no game. Suspending on "game is running" alone killed the
+/// finger gap tester for anyone with the app open beside the game.
 pub static SUSPENDED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// Analog trigger over this (0–255) counts as a digital press.
 const TRIGGER_THRESHOLD: u8 = 30;
