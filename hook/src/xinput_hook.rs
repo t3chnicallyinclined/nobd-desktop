@@ -91,6 +91,21 @@ static CONT_SYNCED_MASK: [AtomicU32; NUM_PLAYERS] =
     [const { AtomicU32::new(XINPUT_ATTACK_MASK as u32) }; NUM_PLAYERS];
 static CONT_PRESS_TS: [[AtomicU64; 16]; NUM_PLAYERS] =
     [const { [const { AtomicU64::new(0) }; 16] }; NUM_PLAYERS];
+/// Has the background reader ever published a windowed result for this slot?
+///
+/// FAIL-SAFE. `continuous_apply` builds the delivered word as
+/// `(raw & !mask) | (committed & mask)`, so a slot whose `CONT_COMMITTED` has never been
+/// written delivers ZERO attack bits -- it does not pass input through, it DELETES it.
+/// That is exactly what happened when the detour was taught the index->slot mapping and
+/// the reader was not: the reader published slot 1, the detour read slot 0, and every
+/// attack on the stick vanished.
+///
+/// The mapping bug is fixed, but the shape that turned a mismatch into silent input loss
+/// should not exist. Until the reader has actually published for a slot, that slot is
+/// raw passthrough. Worst case the player gets no sync for a few milliseconds at startup;
+/// they never get a dead button.
+static CONT_LIVE: [AtomicU32; NUM_PLAYERS] = [const { AtomicU32::new(0) }; NUM_PLAYERS];
+
 static GAME_LAST_DELIVERED: [AtomicU32; NUM_PLAYERS] = [const { AtomicU32::new(0) }; NUM_PLAYERS];
 static WITHHELD_SEEN: [AtomicU32; NUM_PLAYERS] = [const { AtomicU32::new(0) }; NUM_PLAYERS];
 static HEARTBEATS: AtomicU64 = AtomicU64::new(0);
@@ -266,6 +281,9 @@ unsafe fn continuous_apply(p: usize, btn: *mut u16, raw: u16) {
     if !crate::config::enabled() {
         return; // raw passthrough
     }
+    if CONT_LIVE[p].load(Ordering::Relaxed) == 0 {
+        return; // reader has never published for this slot -- pass through, never delete
+    }
     let mask = CONT_SYNCED_MASK[p].load(Ordering::Relaxed) as u16;
     let committed = CONT_COMMITTED[p].load(Ordering::Relaxed) as u16 | due_now(p, raw);
     let delivered = (raw & !mask) | (committed & mask);
@@ -329,13 +347,21 @@ fn continuous_poll_loop() {
             continue;
         };
 
-        for p in 0..NUM_PLAYERS {
+        // Walk XInput USER INDICES and map each to a player slot with the same
+        // first-come table the detour uses (XI_SLOT_OF_IDX). This loop used to run
+        // `for p in 0..NUM_PLAYERS` and read index `p`, i.e. index-as-slot -- the same
+        // assumption the detour made. Fixing only the detour made it strictly worse: the
+        // reader published the window's output to slot 1 while the detour read slot 0, so
+        // the two halves of the hook disagreed about who the player was. Both paths must
+        // resolve a slot the same way or the window's result never reaches the game.
+        for idx in 0..XI_SLOT_OF_IDX.len() as u32 {
             // XINPUT_STATE = dwPacketNumber(4) + XINPUT_GAMEPAD(12) = 16 bytes.
             let mut buf = [0u8; 16];
-            let r = unsafe { real(p as u32, buf.as_mut_ptr() as *mut c_void) };
+            let r = unsafe { real(idx, buf.as_mut_ptr() as *mut c_void) };
             if r != 0 {
                 continue; // controller not connected
             }
+            let Some(p) = slot_for_idx(idx) else { continue };
             let raw = u16::from_le_bytes([buf[WBUTTONS_OFFSET], buf[WBUTTONS_OFFSET + 1]]);
             let now = EPOCH.get_or_init(Instant::now).elapsed().as_micros() as u64;
 
@@ -443,6 +469,9 @@ fn continuous_poll_loop() {
                 crate::config::record_latency(p, sw[p].last_commit_delay_us() as u64);
             }
             CONT_COMMITTED[p].store((filtered & synced_mask) as u32, Ordering::Relaxed);
+            // Publish AFTER the first real committed value, so the detour never reads a
+            // zeroed slot as "all attacks released".
+            CONT_LIVE[p].store(1, Ordering::Relaxed);
             CONT_SYNCED_MASK[p].store(synced_mask as u32, Ordering::Relaxed);
         }
 
