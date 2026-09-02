@@ -1,6 +1,6 @@
 [package]
 name = "nobd-hook"
-version = "0.7.0"
+version = "0.7.1"
 edition = "2021"
 description = "NOBD in-game sync window - a DINPUT8.dll proxy for MvC2"
 

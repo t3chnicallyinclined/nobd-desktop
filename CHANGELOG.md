@@ -1,5 +1,90 @@
 # Changelog
 
+## v0.7.1
+
+Mostly one bug, and it was making NOBD look broken on a very ordinary setup.
+
+### Your controller wasn't being found
+
+The hook used the XInput **user index** as the player slot. The game does not: it
+claims the first index that answers, so a single stick very often lands on index 1
+with index 0 empty. Everything measured about your hands then went to NOBD's player
+2 record while every screen in the app reads player 1.
+
+The result was an app that showed nothing for a stick that was working perfectly:
+no finger gap, no recommendation, an empty tape. Slots are now claimed
+first-come-first-served on the first successful read, so the first stick to answer
+is player 1 whatever index the game found it on — and the app shows which pad it
+claimed, because an assumption you can see is one you can question.
+
+A pad on index 2 or higher was previously dropped entirely.
+
+### The tester no longer lags behind your hands
+
+The reader threads had no way to wake the UI. Nothing was ever lost — the channel is
+drained in full — but it was only drained when the UI happened to repaint, and the
+repaint schedule falls to 500 ms whenever nothing is "animating". The finger gap
+tester runs in exactly that state, because the game being closed is what makes every
+other liveness term false. So the first press of a burst sat unseen for up to half a
+second.
+
+Both readers now wake the UI on any edge, and there is a third repaint tier: 33 ms
+while you are actively pressing, 100 ms while something is merely live, 500 ms for a
+static screen.
+
+### Fixed
+
+- **A press whose window had expired no longer waits a frame.** The window runs on a
+  1.4 kHz thread, so its commit could land up to 700 µs after the deadline it was
+  aiming at. If the game's read fell in that gap, a press that was genuinely ready
+  cost a full frame — 700 µs of our own scheduling slop costing 16.7 ms, on roughly
+  4% of presses. The decision is now taken at the game's read.
+- **The virtual-controller instructions are gone for good.** With Marvel running the
+  hook DLL cannot be replaced, and the app read that as "the hook isn't the path" and
+  fell back to telling you to open your game's controller settings and pick "NOBD
+  Controller (Xbox 360)" — a device that has not existed since v0.7.0 replaced the
+  virtual pad. A pending DLL update is not a reason to offer a different architecture.
+- **Windowing directions is removed.** MvC2 SOCD-cleans to neutral immediately after
+  it reads input, so a windowed UP+DOWN or LEFT+RIGHT was discarded by the game. The
+  mode could delete a direction you were holding, and there was nothing to buy: at
+  60 fps a frame is 16.7 ms and the window at most 16 ms, so a direction and a button
+  share a frame regardless.
+- **A hook that cannot reach its reader now passes input through instead of deleting
+  it.** The delivered word is built as `(raw & !mask) | (committed & mask)`, so a
+  player slot the reader had never published for delivered *zero* attack bits. Every
+  failure in this path now degrades toward passthrough; missing sync for a few
+  milliseconds is acceptable, a dead button never is.
+- Minimising goes to the tray like the close button already did, and the 2 kHz reader
+  stands down whenever the window is hidden — it was polling for an audience of
+  nobody. 2.1% of one core in the tray, down from 2.7%.
+
+### The window now shows what it costs
+
+The slack control gave no feedback about its price, so "more slack" read as free. It
+is not: the window delays every press, and the chance the game's read falls inside
+that delay is exactly window ÷ frame.
+
+    3 ms  ->  18% of single presses land a frame later than they would unaided
+    5 ms  ->  30%   (the default)
+    8 ms  ->  48%
+
+Chords do not pay this — they commit the instant the second attack lands — so the
+whole cost falls on presses that turned out to be alone, which is most of them.
+
+The frame period is measured from the game's own input reads rather than assumed. On
+MvC2 that is 16.69 ms, NTSC 59.94 Hz, one read per frame, 93% of intervals inside
+15–17 ms.
+
+### Under the hood
+
+- A poll-cadence probe reports the game's real read cadence once per launch. It costs
+  the game thread one atomic add and one relaxed store, stops after ~17 seconds, and
+  does all its arithmetic on a thread that already exists.
+- Self-update is present but **inert**: it does nothing until a signing key is
+  configured. See `docs/SELF-UPDATE.md`.
+
+---
+
 ## v0.7.0
 
 NOBD now works **inside Marvel** instead of presenting a virtual controller. No

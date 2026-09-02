@@ -1730,7 +1730,7 @@ dependencies = [
 
 [[package]]
 name = "nobd-app"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "base64",
  "eframe",
@@ -1751,7 +1751,7 @@ dependencies = [
 
 [[package]]
 name = "nobd-hook"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "nobd-shared",
  "retour",
