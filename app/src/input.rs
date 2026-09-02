@@ -107,6 +107,27 @@ const IDLE_AFTER: Duration = Duration::from_secs(2);
 /// work, game or no game. Suspending on "game is running" alone killed the
 /// finger gap tester for anyone with the app open beside the game.
 pub static SUSPENDED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Called by a reader thread the instant it sees a button edge, to wake the UI.
+///
+/// Without this the UI only learns about a press when it happens to repaint, and the
+/// repaint schedule drops to 500 ms whenever nothing is "animating" -- which is exactly
+/// the state the finger gap tester runs in, because the game being closed is what makes
+/// every other liveness term false. `poll()` drains the whole channel, so nothing was
+/// ever LOST; the first press of a burst just sat there for up to half a second before
+/// the UI looked. That is the lag.
+///
+/// The tray already wakes the UI this way (`ctx.request_repaint()`); the reader had no
+/// Context and no way to. Set once at startup with a cloned egui Context.
+pub static UI_WAKER: std::sync::OnceLock<Box<dyn Fn() + Send + Sync>> = std::sync::OnceLock::new();
+
+/// Wake the UI if a waker has been installed. Cheap: one relaxed load on the miss path.
+#[inline]
+pub fn wake_ui() {
+    if let Some(w) = UI_WAKER.get() {
+        w();
+    }
+}
 /// Analog trigger over this (0–255) counts as a digital press.
 const TRIGGER_THRESHOLD: u8 = 30;
 /// XInput exposes 4 controller slots.
@@ -412,6 +433,9 @@ impl GamepadInput {
                         // Any edge means the player is playing: hold the loop at
                         // full measurement rate.
                         last_activity = Instant::now();
+                        // ...and wake the UI now rather than letting the press wait out
+                        // the idle repaint interval.
+                        wake_ui();
                         for &(bit, button) in XINPUT_BUTTONS {
                             if changed & bit != 0 {
                                 let msg = if mask & bit != 0 {

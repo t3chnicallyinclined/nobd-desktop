@@ -420,6 +420,13 @@ pub(crate) fn run_reader(id: HidDeviceId, tx: Sender<InputMsg>) {
             };
 
             // Diff: pressed = cur - prev, released = prev - cur.
+            // Wake the UI on any change: the raw-HID reader is the tester's other input
+            // source and has the same problem as the XInput one -- a press that arrives
+            // while the UI is on its 500 ms idle schedule sits in the channel until the
+            // next repaint. See input::wake_ui.
+            if cur != prev {
+                crate::input::wake_ui();
+            }
             for &idx in &cur {
                 if !prev.contains(&idx) {
                     if let Some(b) = map_button(idx) {

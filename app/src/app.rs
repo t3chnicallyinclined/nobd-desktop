@@ -159,6 +159,8 @@ pub struct FingerGapApp {
     // Monotonic chords per controller (the log's "#N", independent of the window).
     total_pairs: Vec<usize>,
     gap_log: std::collections::VecDeque<GapLogEntry>,
+    /// When the tester last logged a press. Drives the repaint rate: see push_log.
+    last_input_at: Option<std::time::Instant>,
     error_msg: Option<String>,
     tray: Option<crate::tray::Tray>,
     last_cfg: crate::persist::Cfg,
@@ -350,6 +352,7 @@ impl FingerGapApp {
             hb_last: 0,
             hb_seen_at: None,
             hb_poll_at: std::time::Instant::now(),
+            last_input_at: None,
 
             legacy_present: crate::nobd_setup::legacy_stack_present(),
             legacy_dismissed: false,
@@ -700,6 +703,12 @@ impl FingerGapApp {
     }
 
     fn push_log(&mut self, entry: GapLogEntry) {
+        // The tester is used with the game CLOSED, which is exactly when nothing else
+        // marks the app as "animating" -- so the repaint schedule dropped to 500 ms and a
+        // press took up to half a second to appear on the tape. The reader thread has no
+        // egui Context and cannot wake us, so record the moment here and let the repaint
+        // schedule below treat recent input as live.
+        self.last_input_at = Some(std::time::Instant::now());
         // VecDeque: `Vec::remove(0)` shifted the whole 500-entry buffer on every
         // press once it filled.
         self.gap_log.push_back(entry);
@@ -712,6 +721,14 @@ impl FingerGapApp {
 
 impl eframe::App for FingerGapApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Let the reader threads wake us the moment a button moves, instead of a press
+        // waiting out whatever repaint interval we happen to be on. Set once; the closure
+        // owns its own Context clone, which is cheap and Send + Sync.
+        let _ = crate::input::UI_WAKER.set({
+            let c = ctx.clone();
+            Box::new(move || c.request_repaint())
+        });
+
         if ctx.input(|i| i.viewport().close_requested()) {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             // MINIMISE, do not hide. With `Visible(false)` eframe stops calling
@@ -723,6 +740,17 @@ impl eframe::App for FingerGapApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
             // Minimise AND drop the taskbar button, so X really does put it away
             // to the tray - without the 100%-of-a-core spin that hiding causes.
+            crate::tray::set_taskbar_button(false);
+            self.hidden = true;
+            WINDOW_HIDDEN.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        // A minimise the USER asked for should go to the tray too, not just the X.
+        // Only the close button did this, so minimising left a taskbar button behind AND
+        // left WINDOW_HIDDEN false -- which meant the 2 kHz reader never stood down while
+        // the game ran, the one case it exists to avoid. Runs after the close block, so
+        // our own Minimized(true) has already set `self.hidden` and cannot re-trigger.
+        if !self.hidden && ctx.input(|i| i.viewport().minimized.unwrap_or(false)) {
             crate::tray::set_taskbar_button(false);
             self.hidden = true;
             WINDOW_HIDDEN.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -750,7 +778,13 @@ impl eframe::App for FingerGapApp {
             || self.sync_service.is_active()
             || self
                 .proof_pulse
-                .is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(400));
+                .is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(400))
+            // Someone is using the finger gap tester. Without this the tape redrew at
+            // 2 fps in the one situation it exists for, because the game being closed is
+            // what made every other `animating` term false.
+            || self
+                .last_input_at
+                .is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(2));
         if self.hidden {
             // Ask for NOTHING while hidden. This used to tick deliberately, "so
             // the show flag and tray check marks are picked up promptly" - but
@@ -762,7 +796,18 @@ impl eframe::App for FingerGapApp {
             // 10 fps while something is live. The pulse dot and the counters
             // are perfectly legible at that, and it is a third of the redraw
             // cost of 30 fps for no visible difference.
-            ctx.request_repaint_after(std::time::Duration::from_millis(if animating {
+            // Three tiers, cheapest that still reads right:
+            //   33 ms  someone is pressing buttons at us -- the tester has to feel
+            //          immediate, and this is the only state where a human is watching
+            //          for a specific press to appear
+            //  100 ms  something is live but nobody is mid-input (counters, pulse dot)
+            //  500 ms  a static screen
+            let testing = self
+                .last_input_at
+                .is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(2));
+            ctx.request_repaint_after(std::time::Duration::from_millis(if testing {
+                33
+            } else if animating {
                 100
             } else {
                 500
