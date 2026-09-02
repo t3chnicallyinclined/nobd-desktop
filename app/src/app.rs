@@ -1168,19 +1168,34 @@ impl FingerGapApp {
                     .color(if live { INK_DIM } else { INK_FAINT }),
             );
 
-            // The bulk stream is a property of the input path, not a zone of its
-            // own — as a chip it costs zero vertical pixels and cannot make the
-            // layout appear and disappear.
-            let rate = self.sync_service.bulk_rate();
-            if rate > 0 {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            // Right-aligned chips: the version, then the bulk stream if there is one.
+            // Both cost zero vertical pixels and cannot make the layout appear and
+            // disappear.
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // The version was nowhere in the UI at all. That is fine right up until
+                // someone reports a bug, or until self-update starts moving people
+                // between builds without asking — at which point "which version am I on"
+                // becomes the first question and there was no way to answer it.
+                ui.label(
+                    RichText::new(format!("v{}", crate::updater::VERSION))
+                        .size(11.0)
+                        .color(INK_FAINT),
+                )
+                .on_hover_text(if crate::updater::configured() {
+                    "NOBD Desktop. Updates install themselves when Marvel is closed."
+                } else {
+                    "NOBD Desktop. Automatic updates are not enabled in this build."
+                });
+
+                let rate = self.sync_service.bulk_rate();
+                if rate > 0 {
                     ui.label(
                         RichText::new(format!("{:.0} kHz stream", rate as f32 / 1000.0))
                             .size(11.0)
                             .color(LIVE),
                     );
-                });
-            }
+                }
+            });
         });
     }
 

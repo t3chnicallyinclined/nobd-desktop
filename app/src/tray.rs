@@ -130,7 +130,10 @@ pub fn spawn(ctx: egui::Context) -> Option<Tray> {
 
     let tray = TrayIconBuilder::new()
         .with_menu(Box::new(menu))
-        .with_tooltip("NOBD Desktop")
+        // Version in the hover text too: the tray icon is often the only NOBD surface
+        // on screen while someone is playing, and "which build am I on" is the first
+        // question of every bug report.
+        .with_tooltip(format!("NOBD Desktop v{}", crate::updater::VERSION))
         .with_icon(make_icon())
         .build()
         .ok()?;
