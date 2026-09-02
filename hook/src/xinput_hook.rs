@@ -40,6 +40,47 @@ static XIGS_CALLS: AtomicU64 = AtomicU64::new(0);
 static XEDGE_LOGS: AtomicU64 = AtomicU64::new(0);
 static XLAST:      AtomicU32 = AtomicU32::new(0xFFFF_FFFF);
 
+/// XInput user index -> NOBD player slot, claimed in order of first successful read.
+///
+/// We used to use the user index AS the slot. The game does not: `sAppPad` walks user
+/// indices 0..4 and claims the first that answers ERROR_SUCCESS, so a single stick very
+/// commonly lands on index 1 with index 0 returning 1167 ERROR_DEVICE_NOT_CONNECTED --
+/// which is exactly what this machine does. The effect was that a solo player's telemetry
+/// (finger gap, frame time, the recommendation, the whole event tape) was written to
+/// NOBD's player-2 record while every screen in the app reads player 1, so the app showed
+/// an empty measurement for a stick that was working perfectly. A pad on index >= 2 was
+/// dropped entirely by the `p < NUM_PLAYERS` gate.
+///
+/// Stored index+1 so that 0 means "unclaimed" and slot 0 is representable.
+static XI_SLOT_OF_IDX: [AtomicU32; 8] = [const { AtomicU32::new(0) }; 8];
+
+/// Map an XInput user index to a NOBD slot, first-come-first-served.
+#[inline]
+fn slot_for_idx(idx: u32) -> Option<usize> {
+    let i = idx as usize;
+    if i >= XI_SLOT_OF_IDX.len() {
+        return None;
+    }
+    let claimed = XI_SLOT_OF_IDX[i].load(Ordering::Relaxed);
+    if claimed != 0 {
+        return Some((claimed - 1) as usize);
+    }
+    // Unclaimed: take the lowest free slot. Racy only between two indices calling for the
+    // first time simultaneously, and the CAS makes that safe -- the loser retries the next
+    // slot rather than sharing one.
+    for s in 0..NUM_PLAYERS {
+        if !(0..XI_SLOT_OF_IDX.len()).any(|j| XI_SLOT_OF_IDX[j].load(Ordering::Relaxed) == s as u32 + 1)
+            && XI_SLOT_OF_IDX[i]
+                .compare_exchange(0, s as u32 + 1, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+        {
+            crate::log::log(&format!("xinput: user index {idx} -> NOBD player {}", s + 1));
+            return Some(s);
+        }
+    }
+    None // more pads than slots: pass through untouched rather than fold onto someone else
+}
+
 static EPOCH: OnceLock<Instant> = OnceLock::new();
 // per-player last game-read time (frame-time + straddle detection).
 static LAST_POLL_US: [AtomicU64; NUM_PLAYERS] = [const { AtomicU64::new(0) }; NUM_PLAYERS];
@@ -67,10 +108,11 @@ unsafe extern "system" fn our_xinput_get_state(idx: u32, p_state: *mut c_void) -
     }
     crate::config::heartbeat(); // let nobd.exe know the in-game hook is live
 
-    let p = idx as usize;
-    // Sync only the player slots we track; a controller in a higher slot passes
-    // through untouched.
-    if ret == 0 && !p_state.is_null() && p < NUM_PLAYERS {
+    // The user index is NOT the player slot -- see XI_SLOT_OF_IDX. Claim a slot on the
+    // first successful read so the first stick to answer is player 1, whatever index the
+    // game happened to find it on.
+    let slot = (ret == 0).then(|| slot_for_idx(idx)).flatten();
+    if let (Some(p), false) = (slot, p_state.is_null()) {
         // Frame-time from this controller's poll cadence.
         let epoch = EPOCH.get_or_init(Instant::now);
         let now_us = epoch.elapsed().as_micros() as u64;
