@@ -1,3 +1,4 @@
+mod pollprobe;
 mod config;
 mod dinput_export;
 mod dinput_hook;

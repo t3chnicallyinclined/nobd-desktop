@@ -76,7 +76,14 @@ unsafe extern "system" fn our_xinput_get_state(idx: u32, p_state: *mut c_void) -
         let now_us = epoch.elapsed().as_micros() as u64;
         let last = LAST_POLL_US[p].swap(now_us, Ordering::Relaxed);
         if last != 0 {
-            crate::config::record_frame_us(p, now_us - last);
+            let delta = now_us - last;
+            crate::config::record_frame_us(p, delta);
+            // Two atomics, no filtering, stops when full. See pollprobe.rs for why the
+            // sample must be RAW: record_frame_us's 4..40ms band would discard exactly
+            // the cadence we are trying to detect.
+            if p == 0 {
+                crate::pollprobe::sample(delta);
+            }
         }
 
         unsafe {
@@ -285,6 +292,13 @@ fn continuous_poll_loop() {
                     CONT_COMMITTED[1].load(Ordering::Relaxed),
                     crate::config::frame_waits(0), crate::config::gp_count(0),
                 ));
+            }
+            // Poll-cadence probe: sorting and formatting happen HERE, never on the
+            // game thread. Reports once, then costs nothing.
+            if crate::pollprobe::ready() {
+                if let Some(r) = crate::pollprobe::report() {
+                    crate::log::log(&r);
+                }
             }
             iters = 0;
             rate_start = Instant::now();
