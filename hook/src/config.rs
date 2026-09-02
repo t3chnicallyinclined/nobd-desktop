@@ -8,7 +8,6 @@ use nobd_shared::{state, PlayerStats, NUM_PLAYERS};
 #[inline] pub fn enabled() -> bool { state().enabled.load(Ordering::Relaxed) != 0 }
 #[inline] pub fn window_ms(p: usize) -> u128 { state().window_ms[p.min(NUM_PLAYERS - 1)].load(Ordering::Relaxed) as u128 }
 #[inline] pub fn window_ms_u32(p: usize) -> u32 { state().window_ms[p.min(NUM_PLAYERS - 1)].load(Ordering::Relaxed) }
-#[inline] pub fn directions_windowed() -> bool { state().directions_windowed.load(Ordering::Relaxed) != 0 }
 #[allow(dead_code)]
 #[inline] pub fn settle_ms() -> u64 { state().settle_ms.load(Ordering::Relaxed) as u64 }
 #[inline] pub fn set_poll_hz(hz: u32) { state().poll_hz.store(hz, Ordering::Relaxed); }

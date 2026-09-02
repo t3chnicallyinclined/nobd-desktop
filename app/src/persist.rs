@@ -12,7 +12,6 @@ use nobd_shared::{state, NUM_PLAYERS};
 pub struct Cfg {
     pub enabled: u32,
     pub window: [u32; NUM_PLAYERS], // per-player sync window (ms)
-    pub directions: u32,
     pub mode: u32,
     pub settle: u32,
 }
@@ -101,7 +100,6 @@ pub fn current() -> Cfg {
     Cfg {
         enabled: s.enabled.load(Ordering::Relaxed),
         window,
-        directions: s.directions_windowed.load(Ordering::Relaxed),
         mode: s.mode.load(Ordering::Relaxed),
         settle: s.settle_ms.load(Ordering::Relaxed),
     }
@@ -121,7 +119,10 @@ pub fn load() -> Cfg {
                 let Ok(n) = v.trim().parse::<u32>() else { continue };
                 match k {
                     "enabled" => s.enabled.store(n.min(1), Ordering::Relaxed),
-                    "directions" => s.directions_windowed.store(n.min(1), Ordering::Relaxed),
+                    // "directions" is accepted and ignored: windowing directions was
+                    // removed (the game SOCD-cleans them away). Old settings files
+                    // still carry the key, so swallow it rather than warn.
+                    "directions" => {}
                     "mode" => s.mode.store(n.min(2), Ordering::Relaxed),
                     "settle" => s.settle_ms.store(n.min(3), Ordering::Relaxed),
                     // per-player windows: window0=..., window1=...
@@ -143,9 +144,11 @@ pub fn load() -> Cfg {
 /// Write the current config to disk (called when it changes).
 pub fn save(cfg: &Cfg) {
     if let Some(path) = config_path() {
+        // `directions` is no longer written. Files that still carry it load fine --
+        // the reader accepts and ignores the key.
         let mut body = format!(
-            "enabled={}\ndirections={}\nmode={}\nsettle={}\n",
-            cfg.enabled, cfg.directions, cfg.mode, cfg.settle,
+            "enabled={}\nmode={}\nsettle={}\n",
+            cfg.enabled, cfg.mode, cfg.settle,
         );
         for (i, w) in cfg.window.iter().enumerate() {
             body.push_str(&format!("window{i}={w}\n"));

@@ -405,8 +405,21 @@ fn continuous_poll_loop() {
                 shadow_lead[p] = None;
             }
 
-            let synced_mask: u16 =
-                if crate::config::directions_windowed() { 0xFFFF } else { XINPUT_ATTACK_MASK };
+            // Attacks only. Directions are never windowed, and the option to do so is
+            // gone -- it could not work in this game.
+            //
+            // MvC2 SOCD-cleans to NEUTRAL immediately after it snapshots input
+            // (0x140056EBB in the Steam build: UP+DOWN -> nothing, LEFT+RIGHT -> nothing,
+            // repeated at five more sites). Grouping "near-simultaneous presses onto one
+            // frame" can absolutely emit UP+DOWN or LEFT+RIGHT together during a stick
+            // rotation -- that is the whole point of the stage -- and the game then throws
+            // the direction away entirely. So the mode did not merely fail to help, it
+            // could delete a direction the player was holding.
+            //
+            // Nor was there anything to buy: co-registering a direction WITH a button is
+            // worthless at 60 fps, since a frame is 16,690 us and the window at most
+            // 16,000, so they share a frame regardless.
+            let synced_mask: u16 = XINPUT_ATTACK_MASK;
             // The shared window is pure: it takes the clock and the config
             // rather than reading them itself, so the identical code runs here,
             // in the desktop app and in the Linux daemon.

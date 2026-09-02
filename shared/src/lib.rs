@@ -190,7 +190,13 @@ pub struct SharedState {
     pub enabled: AtomicU32,             // bool (shared)
     pub window_ms: [AtomicU32; NUM_PLAYERS], // per-player sync window (ms)
     pub block_in_frame: AtomicU32,      // bool
-    pub directions_windowed: AtomicU32, // bool
+    /// DEAD. Kept only so the repr(C) layout (and therefore the shared-memory magic)
+    /// is unchanged -- an app and a hook DLL of different vintages must still agree on
+    /// every offset after this one. Nothing reads it. Windowing directions is not a
+    /// setting any more: MvC2 SOCD-cleans to neutral right after it reads input, so a
+    /// windowed UP+DOWN or LEFT+RIGHT is discarded by the game. Reuse this slot for
+    /// something else rather than reviving it.
+    pub _reserved_directions_windowed: AtomicU32,
     pub settle_ms: AtomicU32,
     pub mode: AtomicU32,                // 0=Defer 1=Block 2=Continuous
     pub poll_hz: AtomicU32,             // poll-thread rate (shared)
@@ -209,7 +215,7 @@ impl SharedState {
             w.store(5, Ordering::Relaxed);
         }
         self.block_in_frame.store(0, Ordering::Relaxed);
-        self.directions_windowed.store(0, Ordering::Relaxed);
+        self._reserved_directions_windowed.store(0, Ordering::Relaxed);
         self.settle_ms.store(1, Ordering::Relaxed);
         self.mode.store(2, Ordering::Relaxed); // Continuous
         self.reset_stats();
