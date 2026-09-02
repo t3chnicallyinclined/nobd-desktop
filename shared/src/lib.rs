@@ -141,6 +141,37 @@ impl PlayerStats {
         (max.ceil() as u32 + 1).clamp(3, 16)
     }
 
+    /// The game's measured frame period in ms, or None if we have not watched it read
+    /// input yet. Taken from the interval between the game's own `XInputGetState` calls,
+    /// which IS its frame boundary: measured live on MvC2 at p50 16.69 ms (NTSC 59.94),
+    /// unimodal, 93% of intervals inside 15..17 ms.
+    pub fn frame_ms(&self) -> Option<f64> {
+        let us = self.frame_us.load(Ordering::Relaxed);
+        // The recorder only accepts 4..40ms, so anything non-zero is already sane.
+        (us > 0).then(|| us as f64 / 1000.0)
+    }
+
+    /// What this window costs: the share of SINGLE presses it pushes into the next
+    /// frame.
+    ///
+    /// The window delays every press by `window_ms`. That is invisible unless the game's
+    /// input read falls inside the delay -- and since the read lands uniformly across the
+    /// frame, the chance it does is exactly window/frame. So a 5 ms window on a 16.69 ms
+    /// frame makes 30% of single presses arrive a frame later than they would unaided;
+    /// 3 ms makes it 18%.
+    ///
+    /// Chords do NOT pay this: deliver-on-grouped commits them the moment the second
+    /// attack lands, so the window is only ever charged to presses that turned out to be
+    /// alone. That is the majority of them -- a real session logged 165 singles to 36
+    /// groups -- which is why the number is worth putting in front of the player.
+    ///
+    /// None until we have seen the game's cadence; guessing 60Hz here would state a
+    /// measurement we do not have.
+    pub fn late_press_pct(&self, window_ms: u32) -> Option<f64> {
+        let f = self.frame_ms()?;
+        (f > 0.0).then(|| (window_ms as f64 / f * 100.0).min(100.0))
+    }
+
     /// Whether this slot has seen any activity (so the UI can flag it active).
     pub fn active(&self) -> bool {
         self.groups.load(Ordering::Relaxed) != 0

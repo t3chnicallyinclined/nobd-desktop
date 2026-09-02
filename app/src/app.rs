@@ -1674,18 +1674,46 @@ impl FingerGapApp {
                 // wants it. A player picking "Normal" needs no unit at all.
                 ui.label(RichText::new(format!("slack: {name}")).size(13.0).color(INK_DIM));
                 ui.label(RichText::new(format!("({cur} ms)")).size(11.0).color(INK_FAINT));
+                // What the slack COSTS, in the only unit that means anything: how often a
+                // single press lands a frame later than it would have. The slider used to
+                // give no feedback at all, so "more slack" read as free.
+                if let Some(pct) = st.players[0].late_press_pct(cur) {
+                    ui.label(
+                        RichText::new(format!("\u{00B7} {pct:.0}% of single presses land a frame late"))
+                            .size(11.0)
+                            .color(INK_FAINT),
+                    );
+                }
                 if ui.button(RichText::new("Change").size(12.0).color(ACTION)).clicked() {
                     self.window_popup = !self.window_popup;
                 }
                 if rec > 0 && rec != cur {
                     let looser = rec > cur;
+                    // Say what the trade actually is, both ways. Widening buys reliability
+                    // and costs late presses; narrowing is the reverse.
+                    let tip = match (
+                        st.players[0].late_press_pct(cur),
+                        st.players[0].late_press_pct(rec),
+                    ) {
+                        (Some(a), Some(b)) if looser => format!(
+                            "Measured from your own hands: {rec} ms.\n\
+                             Catches wider chords, at {b:.0}% of single presses landing a \
+                             frame late instead of {a:.0}%."
+                        ),
+                        (Some(a), Some(b)) => format!(
+                            "Measured from your own hands: {rec} ms is enough to catch every \
+                             chord you have made.\n\
+                             Drops late single presses from {a:.0}% to {b:.0}%."
+                        ),
+                        _ => format!("Measured from your own hands: {rec} ms."),
+                    };
                     if ui
                         .button(
                             RichText::new(if looser { "More slack" } else { "Less slack" })
                                 .size(12.0)
                                 .strong(),
                         )
-                        .on_hover_text(format!("Measured from your own hands: {rec} ms."))
+                        .on_hover_text(tip)
                         .clicked()
                     {
                         set_window_ms(rec);
