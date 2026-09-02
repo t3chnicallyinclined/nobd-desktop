@@ -9,6 +9,15 @@ name = "nobd"
 path = "src/main.rs"
 
 [dependencies]
+# Self-updater. Same crate set the Retro Receipts agent has been self-updating with in
+# the field: blocking HTTP (no async runtime in this app), minisign verification of the
+# payload, and an atomic exe swap.
+ureq = { version = "2", features = ["tls"] }
+serde_json = "1"
+minisign-verify = "0.2"
+self-replace = "1"
+base64 = "0.22"
+
 nobd-shared = { path = "../shared" }
 hm-native = { path = "../hm-native" }
 eframe = { version = "0.33", default-features = false, features = ["default_fonts", "glow"] }

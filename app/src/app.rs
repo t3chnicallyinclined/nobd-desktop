@@ -1787,6 +1787,16 @@ impl FingerGapApp {
                 if ui.button(RichText::new("Change").size(12.0).color(ACTION)).clicked() {
                     self.window_popup = !self.window_popup;
                 }
+                // An update that downloaded but could not be applied because Marvel was
+                // open. Say so rather than staying silent and applying it out of nowhere
+                // on some later launch.
+                if let Some(v) = crate::updater::PENDING_UPDATE.lock().ok().and_then(|g| g.clone()) {
+                    ui.label(
+                        RichText::new(format!("\u{00B7} v{v} installs when you close Marvel"))
+                            .size(11.0)
+                            .color(ACTION),
+                    );
+                }
                 if rec > 0 && rec != cur {
                     let looser = rec > cur;
                     // Say what the trade actually is, both ways. Widening buys reliability

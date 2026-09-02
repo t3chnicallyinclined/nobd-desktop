@@ -1,6 +1,7 @@
 // No console window — GUI app, lives in the system tray.
 #![windows_subsystem = "windows"]
 
+mod updater;
 mod app;
 mod bulk;
 mod hid;
@@ -220,6 +221,11 @@ fn main() -> eframe::Result {
             .with_visible(!std::env::args().any(|a| a == "--tray")),
         ..Default::default()
     };
+
+    // Self-update, on its own thread. Inert unless a real signing key is configured, and
+    // it never applies while Marvel is open -- the hook DLL is mapped into the running
+    // game, so a swap there is not merely rude, it is impossible.
+    updater::spawn();
 
     eframe::run_native(
         "NOBD Desktop",
