@@ -81,9 +81,7 @@ unsafe extern "system" fn our_xinput_get_state(idx: u32, p_state: *mut c_void) -
             // Two atomics, no filtering, stops when full. See pollprobe.rs for why the
             // sample must be RAW: record_frame_us's 4..40ms band would discard exactly
             // the cadence we are trying to detect.
-            if p == 0 {
-                crate::pollprobe::sample(delta);
-            }
+            crate::pollprobe::sample(p, delta);
         }
 
         unsafe {
@@ -295,8 +293,8 @@ fn continuous_poll_loop() {
             }
             // Poll-cadence probe: sorting and formatting happen HERE, never on the
             // game thread. Reports once, then costs nothing.
-            if crate::pollprobe::ready() {
-                if let Some(r) = crate::pollprobe::report() {
+            if let Some(pp) = crate::pollprobe::ready() {
+                if let Some(r) = crate::pollprobe::report(pp) {
                     crate::log::log(&r);
                 }
             }
