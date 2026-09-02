@@ -196,7 +196,15 @@ pub struct SharedState {
     /// setting any more: MvC2 SOCD-cleans to neutral right after it reads input, so a
     /// windowed UP+DOWN or LEFT+RIGHT is discarded by the game. Reuse this slot for
     /// something else rather than reviving it.
-    pub _reserved_directions_windowed: AtomicU32,
+    /// Which XInput user index the hook claimed for each player slot: one byte per
+    /// slot (slot 0 in bits 0..7, slot 1 in bits 8..15), 0xFF = unclaimed.
+    ///
+    /// Reusing the old `directions_windowed` slot, so the repr(C) layout and the NBD4
+    /// magic are unchanged. Controller identity used to be entirely implicit -- the hook
+    /// silently claimed whichever index answered first and nothing surfaced it -- which
+    /// is how an index-vs-slot mismatch ran for two commits while deleting every attack.
+    /// An assumption the user can see is one they can correct.
+    pub xi_index_of_slot: AtomicU32,
     pub settle_ms: AtomicU32,
     pub mode: AtomicU32,                // 0=Defer 1=Block 2=Continuous
     pub poll_hz: AtomicU32,             // poll-thread rate (shared)
@@ -209,13 +217,29 @@ pub struct SharedState {
 }
 
 impl SharedState {
+    /// Record that `idx` (an XInput user index) drives player `slot`.
+    pub fn set_xi_index(&self, slot: usize, idx: u32) {
+        if slot >= NUM_PLAYERS { return; }
+        let sh = (slot * 8) as u32;
+        let cur = self.xi_index_of_slot.load(Ordering::Relaxed);
+        let new = (cur & !(0xFFu32 << sh)) | ((idx & 0xFF) << sh);
+        self.xi_index_of_slot.store(new, Ordering::Relaxed);
+    }
+
+    /// The XInput user index driving `slot`, or None if nothing has claimed it.
+    pub fn xi_index(&self, slot: usize) -> Option<u32> {
+        if slot >= NUM_PLAYERS { return None; }
+        let b = (self.xi_index_of_slot.load(Ordering::Relaxed) >> (slot * 8)) & 0xFF;
+        (b != 0xFF).then_some(b)
+    }
+
     fn init_defaults(&self) {
         self.enabled.store(1, Ordering::Relaxed);
         for w in &self.window_ms {
             w.store(5, Ordering::Relaxed);
         }
         self.block_in_frame.store(0, Ordering::Relaxed);
-        self._reserved_directions_windowed.store(0, Ordering::Relaxed);
+        self.xi_index_of_slot.store(0xFFFF_FFFF, Ordering::Relaxed); // all unclaimed
         self.settle_ms.store(1, Ordering::Relaxed);
         self.mode.store(2, Ordering::Relaxed); // Continuous
         self.reset_stats();

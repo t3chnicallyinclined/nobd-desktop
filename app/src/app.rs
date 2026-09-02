@@ -1124,8 +1124,21 @@ impl FingerGapApp {
     /// Is the in-game hook the active path? When it is, the virtual controller
     /// is not just unnecessary, it is the thing that puts a second identical
     /// Xbox pad in Steam - so its whole UI comes off the screen.
+    /// Is the in-game hook how NOBD reaches the game at all?
+    ///
+    /// This asks "did we find Marvel", NOT "is the DLL currently up to date". It used to
+    /// also require `installed`, which conflated two different questions and produced a
+    /// bad failure: with Marvel running the DLL cannot be replaced, so `installed` goes
+    /// false for a moment, and the app concluded the hook was not the path and fell back
+    /// to the deprecated virtual-controller flow -- telling the player to pick "NOBD
+    /// Controller (Xbox 360)" in their game and warning about two Xbox pads, neither of
+    /// which exists any more. A pending DLL update is not a reason to offer a different
+    /// architecture.
+    ///
+    /// Whether the hook is in place is `hook_state.installed`; whether it is running is
+    /// `hook_live()`. Those are the two the UI should report on.
     fn hook_is_path(&self) -> bool {
-        self.game_dir.is_some() && self.hook_state.installed.load(std::sync::atomic::Ordering::Relaxed)
+        self.game_dir.is_some()
     }
 
     /// Is the in-game hook running RIGHT NOW? True only while the heartbeat is
@@ -1589,7 +1602,11 @@ impl FingerGapApp {
         // `controller_present` alone, which is false by design once the hook is
         // the path - so every row said "NOBD off" while the card above it
         // correctly said NOBD IS LIVE IN MARVEL.
-        let sync_on = (self.controller_present || self.hook_is_path())
+        // `hook_live()`, not `hook_is_path()`: the tape reports what happened to a real
+        // press, so the question is whether the hook was RUNNING, not whether Marvel is
+        // installed. (hook_is_path used to imply the DLL was current, which made it a
+        // rough proxy for live; it no longer does.)
+        let sync_on = (self.controller_present || self.hook_live())
             && st.enabled.load(std::sync::atomic::Ordering::Relaxed) != 0;
 
         // Before and after, on the same row. Two separate readouts made the app
@@ -1672,6 +1689,24 @@ impl FingerGapApp {
                 ui.label(RichText::new("\u{00B7}").size(13.0).color(INK_FAINT));
                 // The preset NAME is the control; the number is for whoever
                 // wants it. A player picking "Normal" needs no unit at all.
+                // Which pad NOBD actually claimed. This was entirely implicit -- the hook
+                // took whichever XInput index answered first and nothing surfaced it --
+                // which is how an index-vs-slot mismatch ran unnoticed while deleting
+                // every attack. An assumption you can see is one you can question.
+                if let Some(xi) = st.xi_index(0) {
+                    ui.label(
+                        RichText::new(format!("pad: XInput {}", xi + 1))
+                            .size(11.0)
+                            .color(INK_FAINT),
+                    )
+                    .on_hover_text(format!(
+                        "NOBD is syncing the controller Windows reports on XInput slot {}.\n\
+                         The game picks the first slot that answers, so this is often not \
+                         slot 1 even with a single stick plugged in.",
+                        xi + 1
+                    ));
+                    ui.label(RichText::new("\u{00B7}").size(13.0).color(INK_FAINT));
+                }
                 ui.label(RichText::new(format!("slack: {name}")).size(13.0).color(INK_DIM));
                 ui.label(RichText::new(format!("({cur} ms)")).size(11.0).color(INK_FAINT));
                 // What the slack COSTS, in the only unit that means anything: how often a

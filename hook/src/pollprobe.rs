@@ -116,7 +116,7 @@ fn analyse(samples: &[u32]) -> String {
     }
 
     let verdict = if p50 >= 15_000 && p50 <= 18_000 && spread <= 3_000 {
-        "ONE POLL PER FRAME at ~60Hz, tight. Frame-aware committing is viable."
+        "ONE POLL PER FRAME at ~60Hz, tight. The window cost model (W/F) holds."
     } else if p50 >= 15_000 && p50 <= 18_000 {
         "~60Hz median but LOOSE even in the bulk. The next-poll prediction needs a \
          generous safety margin."

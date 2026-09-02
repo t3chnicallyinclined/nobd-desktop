@@ -75,6 +75,8 @@ fn slot_for_idx(idx: u32) -> Option<usize> {
                 .is_ok()
         {
             crate::log::log(&format!("xinput: user index {idx} -> NOBD player {}", s + 1));
+            // Surface it so the app can show which pad it actually claimed.
+            nobd_shared::state().set_xi_index(s, idx);
             return Some(s);
         }
     }
