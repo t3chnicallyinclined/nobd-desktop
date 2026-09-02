@@ -113,13 +113,22 @@ impl HookState {
             loop {
                 let running = crate::gameinstall::game_running();
                 worker.running.store(running, Ordering::Relaxed);
-                // Stand the app's 2 kHz reader down only when the game is up
-                // AND nobody is looking at the tester. With the window open the
-                // user wants it working, game or no game.
+                // Stand the app's 2 kHz reader down whenever the window is hidden.
+                //
+                // This used to also require the game to be running, on the reasoning that
+                // with no game the user might still want the tester live. But the tester
+                // is a THING YOU WATCH -- if the window is in the tray, nobody is reading
+                // it, game or no game, and the reader was polling XInput at 8 ms for an
+                // audience of nobody. Measured 2.7% of a core doing exactly that.
+                //
+                // Nothing is lost by standing down: `show_window_win32` clears
+                // WINDOW_HIDDEN and the show path resets SUSPENDED immediately, so the
+                // reader is back at full rate before the window has finished appearing.
                 crate::input::SUSPENDED.store(
-                    running && WINDOW_HIDDEN.load(Ordering::Relaxed),
+                    WINDOW_HIDDEN.load(Ordering::Relaxed),
                     Ordering::Relaxed,
                 );
+                let _ = running; // still published above for the hook/install UI
                 if let Some(d) = &dir {
                     let current = crate::gameinstall::is_current(d);
                     worker.installed.store(current, Ordering::Relaxed);
@@ -750,10 +759,21 @@ impl eframe::App for FingerGapApp {
         // left WINDOW_HIDDEN false -- which meant the 2 kHz reader never stood down while
         // the game ran, the one case it exists to avoid. Runs after the close block, so
         // our own Minimized(true) has already set `self.hidden` and cannot re-trigger.
-        if !self.hidden && ctx.input(|i| i.viewport().minimized.unwrap_or(false)) {
+        let minimised = ctx.input(|i| i.viewport().minimized.unwrap_or(false));
+        if !self.hidden && minimised {
             crate::tray::set_taskbar_button(false);
             self.hidden = true;
             WINDOW_HIDDEN.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        // And the reverse. Now that the reader stands down purely on WINDOW_HIDDEN, a
+        // window restored by ANY route other than the tray click would otherwise sit
+        // visible with a suspended reader -- a dead tester with no clue why. The tray
+        // path below is the usual way back, but it must not be the only one.
+        if self.hidden && !minimised {
+            crate::tray::set_taskbar_button(true);
+            self.hidden = false;
+            WINDOW_HIDDEN.store(false, std::sync::atomic::Ordering::Relaxed);
+            crate::input::SUSPENDED.store(false, std::sync::atomic::Ordering::Relaxed);
         }
 
         // Tray ("Open NOBD" / left-click) asked to show the window — do it here on
