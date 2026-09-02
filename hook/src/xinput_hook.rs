@@ -148,12 +148,126 @@ unsafe extern "system" fn our_xinput_get_state(idx: u32, p_state: *mut c_void) -
 
 // Continuous mode: sample this player's committed state. Directions/held bits come
 // from the fresh real read; attack bits are overwritten with the windowed value.
+/// Attack bits the window is already DUE to release, evaluated at the instant of the
+/// game's read rather than at the background poll's convenience.
+///
+/// The window itself runs on the background thread at ~1.4 kHz, so its commit can land up
+/// to one poll period (~700 us) after the deadline it was aiming at. That is invisible
+/// almost always -- except when the game's read falls inside that gap. Then a press whose
+/// window has genuinely expired is still uncommitted at the only moment that matters, and
+/// it waits a WHOLE FRAME (16.7 ms) for the next read. A 700 us scheduling artifact
+/// costing 16.7 ms, on roughly 700us/16.69ms = 4% of presses.
+///
+/// So re-ask the two questions the window would ask, with `now` taken here:
+///   * has this press been held at least `window` -- its deadline has passed;
+///   * are 2+ attacks pending -- deliver-on-grouped, nothing left to wait for.
+///
+/// This only ever ADDS bits that are physically held right now. It cannot hide a bit the
+/// window has committed, and it cannot hold one down after release, because `raw` gates it
+/// and the release path is still entirely the window's. Monotone, so it cannot strand a
+/// button. The background thread reaches the same conclusion within a poll and
+/// CONT_COMMITTED converges; this just stops the game seeing the stale answer.
+///
+/// Cost on the game thread: a handful of relaxed loads once per frame. No lock, no
+/// allocation, and it never blocks -- the game's input read is still never made to wait.
+#[inline]
+fn due_now(p: usize, raw: u16) -> u16 {
+    if !crate::config::enabled() {
+        return 0;
+    }
+    let committed = CONT_COMMITTED[p].load(Ordering::Relaxed) as u16;
+    let pending = raw & XINPUT_ATTACK_MASK & !committed;
+    if pending == 0 {
+        return 0;
+    }
+    let window_us = (crate::config::window_ms_u32(p).clamp(1, 16) as u64) * 1000;
+    let now = EPOCH.get_or_init(Instant::now).elapsed().as_micros() as u64;
+    let mut ts = [0u64; 16];
+    let mut bits = pending;
+    while bits != 0 {
+        let b = bits.trailing_zeros() as usize;
+        bits &= bits - 1;
+        ts[b] = CONT_PRESS_TS[p][b].load(Ordering::Relaxed);
+    }
+    due_bits(pending, now, window_us, &ts)
+}
+
+/// The decision itself, pure so it can be tested without the statics or a clock.
+fn due_bits(pending: u16, now_us: u64, window_us: u64, ts: &[u64; 16]) -> u16 {
+    // Deliver-on-grouped: the chord is complete, so the window has nothing left to wait
+    // for and would commit all of it. Matches sync_window.rs's `grouped` rule.
+    if pending.count_ones() >= 2 {
+        return pending;
+    }
+    let mut due = 0u16;
+    let mut bits = pending;
+    while bits != 0 {
+        let b = bits.trailing_zeros() as usize;
+        bits &= bits - 1;
+        // ts == 0 means we never saw the rising edge (the background reader was suspended,
+        // or this is its first poll). Leave those to the window rather than guessing.
+        if ts[b] != 0 && now_us.saturating_sub(ts[b]) >= window_us {
+            due |= 1 << b;
+        }
+    }
+    due
+}
+
+#[cfg(test)]
+mod due_tests {
+    use super::due_bits;
+    const W: u64 = 5_000;
+    fn at(bit: usize, t: u64) -> [u64; 16] {
+        let mut a = [0u64; 16];
+        a[bit] = t;
+        a
+    }
+
+    #[test]
+    fn a_press_still_inside_its_window_is_not_due() {
+        // pressed at 1000, read at 3000: only 2ms held, window is 5ms.
+        assert_eq!(due_bits(1 << 4, 3_000, W, &at(4, 1_000)), 0);
+    }
+
+    /// The whole point: the deadline passed between background polls, and the game read
+    /// lands in that gap. Without this the press waits a full frame.
+    #[test]
+    fn a_press_past_its_deadline_is_due_even_if_the_poller_has_not_caught_up() {
+        assert_eq!(due_bits(1 << 4, 6_100, W, &at(4, 1_000)), 1 << 4);
+    }
+
+    #[test]
+    fn exactly_at_the_deadline_is_due() {
+        assert_eq!(due_bits(1 << 4, 6_000, W, &at(4, 1_000)), 1 << 4);
+    }
+
+    /// Two attacks pending is a complete chord -- commit both, whatever the clock says.
+    #[test]
+    fn a_complete_chord_is_due_immediately() {
+        let mut ts = at(4, 6_000);
+        ts[5] = 6_100; // both pressed a moment ago, far inside the window
+        assert_eq!(due_bits((1 << 4) | (1 << 5), 6_200, W, &ts), (1 << 4) | (1 << 5));
+    }
+
+    /// A missing timestamp must not be read as "pressed at 0", which would make every
+    /// such bit instantly due and defeat the window entirely.
+    #[test]
+    fn an_unseen_rising_edge_is_left_to_the_window() {
+        assert_eq!(due_bits(1 << 4, 999_999, W, &[0u64; 16]), 0);
+    }
+
+    #[test]
+    fn nothing_pending_is_nothing_due() {
+        assert_eq!(due_bits(0, 999_999, W, &at(4, 1)), 0);
+    }
+}
+
 unsafe fn continuous_apply(p: usize, btn: *mut u16, raw: u16) {
     if !crate::config::enabled() {
         return; // raw passthrough
     }
     let mask = CONT_SYNCED_MASK[p].load(Ordering::Relaxed) as u16;
-    let committed = CONT_COMMITTED[p].load(Ordering::Relaxed) as u16;
+    let committed = CONT_COMMITTED[p].load(Ordering::Relaxed) as u16 | due_now(p, raw);
     let delivered = (raw & !mask) | (committed & mask);
     unsafe { *btn = delivered; }
 
