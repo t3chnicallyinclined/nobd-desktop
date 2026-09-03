@@ -1808,6 +1808,24 @@ impl FingerGapApp {
                 // What the slack COSTS, in the only unit that means anything: how often a
                 // single press lands a frame later than it would have. The slider used to
                 // give no feedback at all, so "more slack" read as free.
+                // Running BOTH the firmware and the desktop hook. Chords are unharmed --
+                // pre-grouped input trips deliver-on-grouped immediately -- but every
+                // SINGLE press pays two windows, so it lands a frame late roughly twice as
+                // often. Worth interrupting for, because nothing else would ever tell them.
+                if st.players[0].upstream_grouping() {
+                    ui.label(
+                        RichText::new("\u{00B7} your stick already groups \u{2014} running both doubles single-press delay")
+                            .size(11.0)
+                            .color(NEEDS_YOU),
+                    )
+                    .on_hover_text(
+                        "Every chord reached us already grouped, which a hand cannot do \
+                         repeatedly \u{2014} so your stick is almost certainly running NOBD \
+                         firmware.\n\nGrouping still works, but a single press now waits out \
+                         the stick's window AND this one. Remove NOBD from Marvel and let the \
+                         firmware do it alone.",
+                    );
+                }
                 if let Some(pct) = st.players[0].late_press_pct(cur) {
                     ui.label(
                         RichText::new(format!("\u{00B7} {pct:.0}% of single presses land a frame late"))

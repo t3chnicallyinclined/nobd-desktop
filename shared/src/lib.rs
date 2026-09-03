@@ -141,6 +141,37 @@ impl PlayerStats {
         (max.ceil() as u32 + 1).clamp(3, 16)
     }
 
+    /// Does something UPSTREAM of us already group presses — i.e. is this a stick running
+    /// NOBD firmware, with the desktop hook then applying a second window on top?
+    ///
+    /// We cannot answer this by identity. A GP2040-CE stick in XInput mode enumerates as
+    /// `VID_045E&PID_028E`, the generic Xbox 360 id, indistinguishable from any other pad
+    /// — the same wall that made the virtual controller impossible to tell apart.
+    ///
+    /// So detect the BEHAVIOUR instead. If the firmware grouped a chord, both buttons
+    /// reach us inside a single USB report and the raw gap we measure is zero. A hand
+    /// cannot do that repeatedly: at a 1 kHz report rate a human 1–4 ms gap shows up as
+    /// 1–4 ms. One zero is luck; a MAXIMUM of zero across many chords is a machine.
+    ///
+    /// Deliberately uses the max, not the mean — a mean near zero could be a few real
+    /// chords diluting one wide one, whereas a max near zero means EVERY chord arrived
+    /// pre-grouped.
+    ///
+    /// What it costs to be wrong, in both directions:
+    ///   false positive → a dismissible notice suggesting a setting the player may ignore
+    ///   false negative → they keep running both, and every SINGLE press pays two windows
+    ///                    (10 ms rather than 5), landing a frame late ~60% of the time
+    ///                    instead of ~30%. Chords are unaffected: pre-grouped input trips
+    ///                    deliver-on-grouped immediately, so the second window adds nothing
+    ///                    to them.
+    /// The asymmetry is why the threshold is generous rather than cautious.
+    pub fn upstream_grouping(&self) -> bool {
+        const MIN_CHORDS: u64 = 8;
+        const HUMAN_FLOOR_US: u64 = 500;
+        self.raw_gap_count.load(Ordering::Relaxed) >= MIN_CHORDS
+            && self.raw_gap_max_us.load(Ordering::Relaxed) <= HUMAN_FLOOR_US
+    }
+
     /// The game's measured frame period in ms, or None if we have not watched it read
     /// input yet. Taken from the interval between the game's own `XInputGetState` calls,
     /// which IS its frame boundary: measured live on MvC2 at p50 16.69 ms (NTSC 59.94),
@@ -348,4 +379,44 @@ unsafe fn map_or_create() -> usize {
         }
     }
     ptr as usize
+}
+
+#[cfg(test)]
+mod upstream_tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    fn stats(count: u64, max_us: u64) -> PlayerStats {
+        let s: PlayerStats = unsafe { std::mem::zeroed() };
+        s.raw_gap_count.store(count, Ordering::Relaxed);
+        s.raw_gap_max_us.store(max_us, Ordering::Relaxed);
+        s
+    }
+
+    /// The firmware grouped everything: every chord arrived inside one USB report.
+    #[test]
+    fn all_chords_pre_grouped_is_detected() {
+        assert!(stats(20, 0).upstream_grouping());
+    }
+
+    /// A human. Even a fast one leaves a measurable gap on at least one chord.
+    #[test]
+    fn a_real_finger_gap_is_not_flagged() {
+        assert!(!stats(50, 2_100).upstream_grouping()); // 2.1 ms — the maintainer's own
+        assert!(!stats(50, 1_000).upstream_grouping());
+    }
+
+    /// One lucky same-report chord is not evidence. The MAX is what matters, and a
+    /// single sample cannot establish it.
+    #[test]
+    fn too_few_chords_is_not_evidence() {
+        assert!(!stats(1, 0).upstream_grouping());
+        assert!(!stats(7, 0).upstream_grouping());
+    }
+
+    /// Nothing pressed yet must never read as "your firmware is grouping".
+    #[test]
+    fn no_data_is_not_a_detection() {
+        assert!(!stats(0, 0).upstream_grouping());
+    }
 }

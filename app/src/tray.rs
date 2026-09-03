@@ -109,11 +109,17 @@ pub fn spawn(ctx: egui::Context) -> Option<Tray> {
     let w3 = CheckMenuItem::new("Window: 3 ms", true, cur_w == 3, None);
     let w5 = CheckMenuItem::new("Window: 5 ms", true, cur_w == 5, None);
     let w8 = CheckMenuItem::new("Window: 8 ms", true, cur_w == 8, None);
+    // A quit that also takes NOBD out of the game. The plain Quit deliberately leaves the
+    // hook installed -- it works with the app closed, which is the whole plug-and-play
+    // design -- but that meant there was no single action for "stop NOBD affecting my
+    // game", and a player trying to rule NOBD out of an input problem had nothing to click.
+    let quit_remove = MenuItem::new("Quit and remove from Marvel", true, None);
     let quit = MenuItem::new("Quit NOBD", true, None);
 
     let (id_open, id_enabled) = (open.id().clone(), enabled.id().clone());
     let (id_w3, id_w5, id_w8, id_quit) =
         (w3.id().clone(), w5.id().clone(), w8.id().clone(), quit.id().clone());
+    let id_quit_remove = quit_remove.id().clone();
 
     let menu = Menu::new();
     menu.append(&open).ok()?;
@@ -127,6 +133,7 @@ pub fn spawn(ctx: egui::Context) -> Option<Tray> {
     menu.append(&w8).ok()?;
     menu.append(&PredefinedMenuItem::separator()).ok()?;
     menu.append(&quit).ok()?;
+    menu.append(&quit_remove).ok()?;
 
     let tray = TrayIconBuilder::new()
         .with_menu(Box::new(menu))
@@ -173,6 +180,19 @@ pub fn spawn(ctx: egui::Context) -> Option<Tray> {
                     for w in &s.window_ms { w.store(5, Ordering::Relaxed); }
                 } else if ev.id == id_w8 {
                     for w in &s.window_ms { w.store(8, Ordering::Relaxed); }
+                } else if ev.id == id_quit_remove {
+                    // Same teardown as Quit, plus take the hook out and REMEMBER that,
+                    // so the install worker does not put it back on the next launch.
+                    let mut ui = crate::persist::load_ui();
+                    ui.hook_enabled = 0;
+                    crate::persist::save_ui(&ui);
+                    crate::gameinstall::HOOK_ENABLED.store(false, Ordering::Relaxed);
+                    if let Some(d) = crate::gameinstall::find_game_dir() {
+                        let _ = crate::gameinstall::uninstall(&d);
+                    }
+                    let _ = crate::hidhide::cloak(false);
+                    crate::sync_service::release_pad();
+                    std::process::exit(0);
                 } else if ev.id == id_quit {
                     // Un-cloak any hidden stick (best-effort) so it isn't left
                     // hidden, then exit right here — the window may be hidden in
