@@ -35,6 +35,15 @@ fn ui_config_path() -> Option<PathBuf> {
 /// from shared memory every frame and has no field for a UI source choice).
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct UiCfg {
+    /// May NOBD install its hook into the game? 1 = yes (default).
+    ///
+    /// This is the real off switch, and it did not exist. Closing the app never disabled
+    /// anything: DINPUT8.dll is a proxy the game loads at startup, so it kept running --
+    /// on defaults, since a closed app cannot publish settings. Worse, deleting it by
+    /// hand did not stick either, because the install worker put it back within a second.
+    /// There was no way for a player to rule NOBD out of an input problem, which is the
+    /// first thing anyone reasonable tries.
+    pub hook_enabled: u32,
     /// 0 = XInput, 1 = raw HID.
     pub input_source: u32,
     /// HID device interface path when `input_source == 1`; empty otherwise.
@@ -56,6 +65,7 @@ pub struct UiCfg {
 pub fn load_ui() -> UiCfg {
     let mut ui = UiCfg::default();
     ui.hide_stick = 1; // default ON — hide the physical stick unless told otherwise
+    ui.hook_enabled = 1; // default ON — NOBD does nothing in-game without it
     if let Some(path) = ui_config_path() {
         if let Ok(text) = std::fs::read_to_string(&path) {
             for line in text.lines() {
@@ -68,6 +78,7 @@ pub fn load_ui() -> UiCfg {
                     "hid_device" => ui.hid_device = v.to_string(),
                     "pad_type" => ui.pad_type = v.parse::<u32>().unwrap_or(0).min(1),
                     "hide_stick" => ui.hide_stick = v.parse::<u32>().unwrap_or(0).min(1),
+                    "hook_enabled" => ui.hook_enabled = v.parse::<u32>().unwrap_or(1).min(1),
                     "keep_controller" => ui.keep_controller = v.parse::<u32>().unwrap_or(0).min(1),
                     _ => {}
                 }
@@ -81,8 +92,9 @@ pub fn load_ui() -> UiCfg {
 pub fn save_ui(ui: &UiCfg) {
     if let Some(path) = ui_config_path() {
         let body = format!(
-            "input_source={}\nhid_device={}\npad_type={}\nhide_stick={}\nkeep_controller={}\n",
+            "input_source={}\nhid_device={}\npad_type={}\nhide_stick={}\nkeep_controller={}\nhook_enabled={}\n",
             ui.input_source, ui.hid_device, ui.pad_type, ui.hide_stick, ui.keep_controller,
+            ui.hook_enabled,
         );
         if let Ok(mut f) = std::fs::File::create(&path) {
             let _ = f.write_all(body.as_bytes());

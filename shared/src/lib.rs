@@ -233,6 +233,39 @@ impl SharedState {
         (b != 0xFF).then_some(b)
     }
 
+    /// Apply the user's saved settings over the defaults.
+    ///
+    /// WHY THIS LIVES HERE and not in the app: the hook DLL creates this mapping itself
+    /// whenever the game starts with nobd.exe closed, and `init_defaults` then seeded
+    /// `enabled = 1, window = 5` unconditionally. So "Pause sync" could never survive a
+    /// closed app -- the hook came back on, at a window the user had not chosen and could
+    /// not see. Both processes reach the shared state through here, so this is the only
+    /// place the fix works for both.
+    ///
+    /// Deliberately tolerant: no file, an unreadable file or a junk line just leaves the
+    /// defaults standing. A settings file must never be able to stop the hook working.
+    fn load_persisted(&self) {
+        let Ok(base) = std::env::var("APPDATA") else { return };
+        let path = std::path::Path::new(&base).join("nobd-desktop").join("config.txt");
+        let Ok(text) = std::fs::read_to_string(path) else { return };
+        for line in text.lines() {
+            let mut it = line.splitn(2, '=');
+            let (Some(k), Some(v)) = (it.next(), it.next()) else { continue };
+            let Ok(n) = v.trim().parse::<u32>() else { continue };
+            match k.trim() {
+                "enabled" => self.enabled.store(n.min(1), Ordering::Relaxed),
+                k if k.starts_with("window") => {
+                    if let Ok(i) = k["window".len()..].parse::<usize>() {
+                        if i < NUM_PLAYERS {
+                            self.window_ms[i].store(n.clamp(1, 16), Ordering::Relaxed);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
     fn init_defaults(&self) {
         self.enabled.store(1, Ordering::Relaxed);
         for w in &self.window_ms {
@@ -246,6 +279,8 @@ impl SharedState {
         self.poll_hz.store(0, Ordering::Relaxed);
         self.dll_heartbeat.store(0, Ordering::Relaxed);
         self.magic.store(MAGIC, Ordering::Release);
+        // Defaults are now in place; let the user's saved settings win.
+        self.load_persisted();
     }
 
     pub fn reset_stats(&self) {

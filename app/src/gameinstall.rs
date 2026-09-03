@@ -138,6 +138,30 @@ pub fn game_running() -> bool {
 /// Put the current DLL in place if it is missing or stale. Returns Ok(true) when
 /// something was written. Needs no elevation: Steam grants BUILTIN\Users
 /// FullControl on its game folders.
+/// Is NOBD allowed to install its hook into the game? Mirrors UiCfg::hook_enabled so the
+/// install worker -- which has no access to the UI state -- can honour it.
+pub static HOOK_ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Take the hook back out of the game folder.
+///
+/// The game then loads Windows' own DirectInput8 from System32, which is exactly what it
+/// does with no mod present. There is no "stock" DINPUT8.dll that belongs in a game
+/// folder, so removing ours IS restoring it. Renamed rather than deleted, so it can be put
+/// back and so nothing of the user's is destroyed on their behalf.
+pub fn uninstall(game_dir: &Path) -> Result<bool, String> {
+    let live = game_dir.join(DLL);
+    if !live.exists() {
+        return Ok(false);
+    }
+    if game_running() {
+        return Err("Close Marvel first - the game has the hook loaded.".into());
+    }
+    let aside = game_dir.join(format!("{DLL}.nobd-off"));
+    let _ = std::fs::remove_file(&aside);
+    std::fs::rename(&live, &aside).map_err(|e| format!("Couldn't remove it: {e}"))?;
+    Ok(true)
+}
+
 pub fn ensure_installed(game_dir: &Path) -> Result<bool, String> {
     if is_current(game_dir) {
         return Ok(false);
@@ -180,10 +204,4 @@ pub fn install(game_dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-pub fn uninstall(game_dir: &Path) -> Result<(), String> {
-    let dll = game_dir.join(DLL);
-    if dll.exists() {
-        std::fs::remove_file(&dll).map_err(|e| format!("Remove failed (is the game running?): {e}"))?;
-    }
-    Ok(())
-}
+

@@ -135,7 +135,15 @@ impl HookState {
                     // Plug and play: put ourselves in place without being asked.
                     // Needs no elevation - Steam grants Users FullControl on its
                     // game folders - so there is nothing to prompt about.
-                    if !current && !running {
+                    // Honour the off switch. Without this the worker put the hook
+                    // straight back within a second of anyone removing it, so there was
+                    // no way to rule NOBD out of an input problem.
+                    if !crate::gameinstall::HOOK_ENABLED.load(Ordering::Relaxed) {
+                        if let Err(e) = crate::gameinstall::uninstall(d) {
+                            *worker.msg.lock().unwrap() = Some(e);
+                        }
+                        worker.installed.store(false, Ordering::Relaxed);
+                    } else if !current && !running {
                         match crate::gameinstall::ensure_installed(d) {
                             Ok(true) => {
                                 worker.installed.store(true, Ordering::Relaxed);
@@ -274,6 +282,12 @@ impl FingerGapApp {
         // Restore saved settings into shared memory before anything reads it.
         let last_cfg = crate::persist::load();
         let ui_cfg = crate::persist::load_ui();
+        // Publish the off switch to the install worker before it starts, or NOBD would
+        // reinstall the hook on launch for someone who had deliberately removed it.
+        crate::gameinstall::HOOK_ENABLED.store(
+            ui_cfg.hook_enabled != 0,
+            std::sync::atomic::Ordering::Relaxed,
+        );
         let hid_devices = list_hid_gamepads();
         let pad_type = PadType::from_u32(ui_cfg.pad_type);
 
@@ -652,6 +666,8 @@ impl FingerGapApp {
     /// Persist the current input-source choice (separate from shared-mem Cfg).
     fn persist_ui(&self) {
         crate::persist::save_ui(&crate::persist::UiCfg {
+            hook_enabled: crate::gameinstall::HOOK_ENABLED
+                .load(std::sync::atomic::Ordering::Relaxed) as u32,
             input_source: match self.source_kind {
                 SourceKind::XInput => 0,
                 SourceKind::Hid => 1,
@@ -1854,12 +1870,45 @@ impl FingerGapApp {
                     self.details_open = !self.details_open;
                 }
                 if hook {
+                    // The REAL off switch. "Pause sync" only clears a flag the hook reads;
+                    // the DLL stays loaded in the game and comes back on defaults the next
+                    // time the game starts without the app. This takes it out entirely.
+                    let installed = self
+                        .hook_state
+                        .installed
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    let allowed = crate::gameinstall::HOOK_ENABLED
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    if ui
+                        .button(
+                            RichText::new(if allowed { "Remove from Marvel" } else { "Add to Marvel" })
+                                .size(12.0),
+                        )
+                        .on_hover_text(if allowed {
+                            "Takes NOBD's DLL out of the game folder so Marvel loads Windows'                              own DirectInput8. Nothing of NOBD touches your inputs until you                              add it back. Marvel must be closed."
+                        } else {
+                            "Puts NOBD's DLL back in the game folder."
+                        })
+                        .clicked()
+                    {
+                        crate::gameinstall::HOOK_ENABLED
+                            .store(!allowed, std::sync::atomic::Ordering::Relaxed);
+                        self.persist_ui();
+                    }
+                    let _ = installed;
                     if ui
                         .button(RichText::new(if on { "Pause sync" } else { "Resume sync" }).size(12.0))
+                        .on_hover_text(
+                            "Leaves the DLL in the game but stops it grouping presses.                              Saved, so it survives closing the app.",
+                        )
                         .clicked()
                     {
                         st.enabled.store(!on as u32, Ordering::Relaxed);
                         st.reset_stats();
+                        // Persist it: the hook re-creates the shared state on defaults when
+                        // the game starts with the app closed, so an unsaved pause silently
+                        // un-paused itself.
+                        crate::persist::save(&crate::persist::current());
                     }
                 } else if ui
                     .button(RichText::new(if live { "Turn NOBD off" } else { "Turn NOBD on" }).size(12.0))
