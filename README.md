@@ -125,7 +125,13 @@ Workspace layout:
 | Crate | Output | Role |
 |-------|--------|------|
 | `app/` | `nobd.exe` | Tray control panel + finger-gap tester (egui) |
-| `shared/` | lib | The shared-memory config/stats struct, mapped by both |
+| `hook/` | `DINPUT8.dll` | The in-game sync window, loaded by the game |
+| `shared/` | lib | The sync window, and the shared-memory config/stats struct mapped by the app and the hook |
+| `linux/` | `nobdd` | The Linux daemon |
+| `hm-native/` | lib | Client for the vendored virtual-controller driver (legacy system-wide mode) |
+
+Build one package at a time (`cargo build -p nobd-app --release`, or `-p nobd-linux` on Linux); the
+workspace is never built whole. [docs/FLOORPLAN.md](docs/FLOORPLAN.md) maps how the crates connect.
 
 ---
 

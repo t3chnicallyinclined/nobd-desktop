@@ -1,5 +1,8 @@
 # hidmaestro-sync — NOBD universal sync on HIDMaestro (SPIKE)
 
+> **Archived spike.** The `vigem-sync` backend this was compared against has been removed, and the
+> Rust client in `../hm-native` replaced this C# one. Kept for reference only.
+
 A spike to evaluate replacing the ViGEmBus virtual-pad backend of NOBD's
 universal sync with a **[HIDMaestro](https://github.com/hifihedgehog/HIDMaestro)**
 UMDF2 user-mode virtual controller.

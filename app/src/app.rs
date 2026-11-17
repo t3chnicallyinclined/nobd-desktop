@@ -189,8 +189,9 @@ pub struct FingerGapApp {
     selected_hid: Option<HidDeviceId>,
     /// Cached display label for the active HID device (for the source note).
     selected_hid_label: String,
-    /// System-wide sync (read real pad → group → virtual pad). Runs by default;
-    /// dropping it unplugs the virtual pad.
+    /// System-wide sync (read real pad → group → virtual pad). Legacy path: it runs
+    /// only when the virtual NOBD Controller is already installed (see `new`), because
+    /// the in-game hook is the default. Dropping it unplugs the virtual pad.
     sync_service: crate::sync_service::SyncService,
     /// NOBD Controller mode (branded HID vs XInput).
     pad_type: PadType,

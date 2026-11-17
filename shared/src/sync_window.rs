@@ -1,7 +1,7 @@
 //! Pure NOBD sync window — `(raw, now_us) -> grouped`, no telemetry, no OS deps.
 //!
-//! Direct port of the firmware's syncGpioGetAll() and the verified C++
-//! `driver/nobd-hid-filter/SyncWindow.h`. The caller passes the current time and
+//! Port of the firmware's syncGpioGetAll(). This file is the canonical desktop
+//! implementation; `driver/nobd-hid-filter/SyncWindow.h` is a C++ version of it. The caller passes the current time and
 //! window in microseconds, so this is testable in isolation and reusable
 //! anywhere: the in-app sync service, the HID filter, or the Linux daemon.
 //!

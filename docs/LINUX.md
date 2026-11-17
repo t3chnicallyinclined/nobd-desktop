@@ -25,7 +25,7 @@ supplies all four as kernel interfaces:
 
 | Windows | Linux | What it costs now |
 |---|---|---|
-| Vendored, EV-signed HIDMaestro UMDF2 driver | `uinput` | ~200 lines. No certificate (**saves the ~$280/yr EV cert**), no reboot, no driver install |
+| Vendored HIDMaestro UMDF2 driver, signed with a self-signed dev certificate | `uinput` | ~200 lines. No certificate, no reboot, no driver install |
 | HidHide filter driver + reboot | `EVIOCGRAB` + one udev rule | Two ioctls |
 | WinUSB / Zadig binding for bulk | `usbfs` | One udev rule |
 | UAC + elevated logon scheduled task | systemd unit | One file |

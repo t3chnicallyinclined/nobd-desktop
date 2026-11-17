@@ -43,8 +43,8 @@ floor. The filter avoids all of it by never adding a device.
 
 ## The core transform
 
-`SyncWindow.h` is a pure `(raw, now_us) -> grouped` function (ported verbatim from
-`src/sync_window.rs`). The filter calls it on each input report:
+`SyncWindow.h` is a pure `(raw, now_us) -> grouped` function (a C++ version of
+`shared/src/sync_window.rs`, which is the canonical implementation). The filter calls it on each input report:
 
 ```
 raw   = extract button bits from the incoming HID input report

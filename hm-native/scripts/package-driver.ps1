@@ -21,7 +21,7 @@ $root = Split-Path $PSScriptRoot -Parent          # hm-native\
 $dst  = Join-Path $root "driver"
 New-Item -ItemType Directory -Force -Path $dst | Out-Null
 
-# 1. Locate + copy the driver files (skip the xusb + signing-helper DLLs).
+# 1. Locate + copy the driver files, including the xusb companion (skip the signing-helper DLLs).
 $src = Get-ChildItem $Source -Directory -ErrorAction SilentlyContinue |
     Where-Object { Test-Path (Join-Path $_.FullName "hidmaestro.inf") } | Select-Object -First 1
 if (-not $src) { throw "HIDMaestro driver files not found in $Source. Run the C# --install-only once first." }
@@ -64,5 +64,5 @@ Write-Host ""
 Write-Host "Vendored bundle ready in $dst"
 Get-ChildItem $dst | ForEach-Object { Write-Host "  $($_.Name)" }
 Write-Host ""
-Write-Host "COMMIT: hidmaestro.inf, HIDMaestro.dll, hidmaestro.cat, nobd-driver.cer, NOTICE.md"
+Write-Host "COMMIT: hidmaestro.inf, HIDMaestro.dll, hidmaestro.cat, hidmaestro_xusb.inf, HMXInput.dll, hidmaestro_xusb.cat, nobd-driver.cer, NOTICE.md"
 Write-Host "DO NOT COMMIT: nobd-driver.pfx (private signing key) - it is gitignored."

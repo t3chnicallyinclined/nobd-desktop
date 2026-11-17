@@ -32,7 +32,7 @@ fn main() {
     let inf = format!(r"{dir}\hidmaestro.inf");
     if !Path::new(&inf).exists() || !Path::new(&cer).exists() {
         eprintln!("Vendored bundle missing. First run (non-elevated):");
-        eprintln!(r"  powershell -File C:\Users\trist\projects\nobd-desktop\hm-native\scripts\package-driver.ps1");
+        eprintln!(r"  powershell -File hm-native\scripts\package-driver.ps1   (from the repository root)");
         std::process::exit(1);
     }
 
