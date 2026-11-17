@@ -1,5 +1,8 @@
 # Self-update — what it does and what it needs from you
 
+> **Status: not switched on.** The public key in `app/src/updater.rs` is still a placeholder, and the
+> updater refuses every update until a real key is set. Nothing self-updates in a released build yet.
+
 Modelled on the Retro Receipts agent's updater (`RetroReceipts-agent/agent/src/updater.rs`),
 which has been self-applying in the field for months.
 

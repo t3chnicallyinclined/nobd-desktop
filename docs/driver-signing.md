@@ -1,5 +1,10 @@
 # Driver signing — future option (NOBD-branded pad / zero-latency HID filter)
 
+> **Historical note.** This was written when the product presented a virtual pad through ViGEmBus.
+> Since v0.7.0 the fix runs inside the game and needs no driver. The legacy virtual-controller mode
+> uses a vendored driver signed with a self-signed dev certificate (`hm-native/driver/NOTICE.md`).
+> Kept for the signing research.
+
 The shipping product (universal sync via **ViGEmBus**) needs **no driver signing from
 us** — ViGEmBus is already production-signed by Nefarius (Secure-Boot-compatible,
 one-click user install, like DS4Windows). This doc captures what it would take to
@@ -27,15 +32,15 @@ ship our *own* driver, for when/if we want it.
 
 ## The hardware token
 EV keys must live on certified hardware. Default: the CA **mails a physical USB
-token** (e.g. SafeNet eToken) to the LLC's registered address; plug it in to sign.
+token** (e.g. SafeNet eToken) to the applicant's registered address; plug it in to sign.
 Alternative: store the key in a **cloud HSM** (Azure Key Vault / Google Cloud KMS)
 or use a cloud signing service — no dongle, slightly more setup, good for CI.
 
-## Eligibility (we have an LLC — we qualify)
+## Eligibility
 - EV has **no 3-year-org rule** (that's Azure Trusted Signing's). A verifiable
   registered business qualifies; a **D-U-N-S number** (free) speeds CA validation.
 - A **sole-proprietor EV** tier even covers kernel drivers for individuals without
-  a business — so the LLC is well clear.
+  a business.
 
 ## The flow
 1. Get the EV cert (LLC validation + D-U-N-S + verification call).

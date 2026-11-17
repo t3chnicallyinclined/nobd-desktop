@@ -8,9 +8,9 @@
 //! Stages:
 //!   1. `shared` — the shared-memory input ABI: create the section+event and
 //!      seqlock-write reports. `report` — our HID descriptor + report packer.
-//!   2. `device` (TODO) — SetupDi ROOT devnode create + `ControllerIndex`.
-//!   3. `install` (TODO) — cert import + `pnputil` against the vendored bundle.
-//!   4. `oem` (TODO) — the three joy.cpl OEM-name registry tables.
+//!   2. `device` — SetupDi ROOT devnode create + `ControllerIndex`.
+//!   3. `install` — cert import + `pnputil` against the vendored bundle.
+//!   4. `oem` — the three joy.cpl OEM-name registry tables.
 
 pub mod controller;
 pub mod device;
