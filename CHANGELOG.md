@@ -1,5 +1,59 @@
 # Changelog
 
+## v0.7.2
+
+The press log could not answer the one question people open the app to ask: is
+NOBD doing anything? This release makes it say so, and gives you a real way to
+take NOBD out of the game.
+
+### The press log says whether NOBD is working
+
+Every row used to end in something like "NOBD off — always safe", which ran two
+unrelated facts together and read as a contradiction.
+
+- A line above the log now states it outright: *NOBD is working*, *NOBD is
+  switched off*, or *Marvel isn't open, so these are your raw presses*.
+- Each row says what NOBD did to that press, then what it means in the game.
+  Green *NOBD synced it — landed together* appears only when NOBD closed a real
+  gap, so green is the proof it works.
+- "NOBD off" covered both *you switched it off* and *Marvel is closed*. They
+  are separate now. With the game closed a row reads *raw press — drops about
+  1 in 4 without NOBD*: a measurement of your hands, not a fault.
+- Rows keep the state they were made in. Flipping the switch used to relabel
+  the whole history, so you could not watch it start working.
+- The odds say what they are odds of: *drops about 1 in 16*, not *about 1 in 16*.
+- A button pressed on its own reads *ONE BUTTON … alone for 52 ms*, not
+  *STRAY (released before pair)*, which looked like a faulty switch.
+
+### A real off switch
+
+Closing the app never turned NOBD off. The hook is loaded by the game, so it
+ran with the app closed, and it came back on defaults you had not chosen.
+
+- **Remove from Marvel / Add to Marvel**, in the window, takes NOBD's file out
+  of the game folder and keeps it out until you add it back. When it is out,
+  the status card says so and offers *Add NOBD to Marvel* right there.
+- **Quit and remove from Marvel**, in the tray menu, takes it out and quits.
+  Starting NOBD again puts it back.
+- **Pause sync and your window setting now survive a closed app.** The hook
+  reads your saved settings when the game starts without the app.
+
+### NOBD firmware and the desktop app together
+
+If your stick already runs NOBD firmware, the app now warns you. Running both
+makes every single press wait out two windows, 10 ms instead of 5. It is
+detected from behaviour: many chords in a row arriving with a gap of exactly
+zero is a machine, not a hand.
+
+### Fixed
+
+- After "Quit and remove from Marvel", the next launch refused to reinstall and
+  showed *INSTALLING…* forever. This affected builds made from source after
+  v0.7.1; no released version had it.
+- The app version is shown in the window and the tray.
+- `run-app.cmd` built the app without the hook, so a build from source had no
+  `DINPUT8.dll` to install.
+
 ## v0.7.1
 
 Mostly one bug, and it was making NOBD look broken on a very ordinary setup.

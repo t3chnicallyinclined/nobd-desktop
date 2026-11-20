@@ -186,8 +186,8 @@ pub enum StrayReason {
 impl StrayReason {
     pub fn label(&self) -> &'static str {
         match self {
-            StrayReason::NoPairArrived => "no pair arrived",
-            StrayReason::ReleasedBeforePair => "released before pair",
+            StrayReason::NoPairArrived => "no second button joined it",
+            StrayReason::ReleasedBeforePair => "let go before a second button",
         }
     }
 }

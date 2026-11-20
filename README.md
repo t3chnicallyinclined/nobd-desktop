@@ -106,8 +106,19 @@ the game's real read cadence.
 | **your fingers, apart** | Your raw gap, measured before the window touches it. |
 
 The event log shows each press as *what your hands did → what the game got*, with
-the odds a 60 Hz game splits it — *about 1 in 5* rather than a percentage. Where
-the answer is certain it says so: *always safe*, or *drops every time*.
+the odds a 60 Hz game splits it — *drops about 1 in 5* rather than a percentage.
+
+Each row first says what NOBD did to that press, at the moment you made it:
+
+| Row says | Meaning |
+|---|---|
+| **NOBD synced it — landed together** (green) | NOBD closed the gap. This is the proof it is working. |
+| already together — nothing to fix | Your stick sent both buttons at the same instant. |
+| outside the 5 ms window — drops about 1 in 3 | Too far apart for NOBD to group; the game got your raw gap. |
+| NOBD switched off — … | You turned sync off; the game got your raw gap. |
+| raw press — drops about 1 in 4 without NOBD | Marvel was closed, so this is just a measurement of your hands. |
+
+The line above the log says which of these applies right now.
 
 ---
 

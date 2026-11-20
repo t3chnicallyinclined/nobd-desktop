@@ -181,11 +181,13 @@ pub fn spawn(ctx: egui::Context) -> Option<Tray> {
                 } else if ev.id == id_w8 {
                     for w in &s.window_ms { w.store(8, Ordering::Relaxed); }
                 } else if ev.id == id_quit_remove {
-                    // Same teardown as Quit, plus take the hook out and REMEMBER that,
-                    // so the install worker does not put it back on the next launch.
-                    let mut ui = crate::persist::load_ui();
-                    ui.hook_enabled = 0;
-                    crate::persist::save_ui(&ui);
+                    // Same teardown as Quit, plus take the hook out. NOT remembered:
+                    // with the app closed nothing can put the hook back, so the game
+                    // stays clean until NOBD is started again - and starting NOBD is
+                    // the player asking for it. Remembering it meant the next launch
+                    // refused to install and looked broken. The lasting off switch is
+                    // "Remove from Marvel" in the window. The flag is still cleared
+                    // here so the install worker cannot race the removal below.
                     crate::gameinstall::HOOK_ENABLED.store(false, Ordering::Relaxed);
                     if let Some(d) = crate::gameinstall::find_game_dir() {
                         let _ = crate::gameinstall::uninstall(&d);

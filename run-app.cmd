@@ -7,7 +7,9 @@ REM Debug build — links in seconds (release LTO takes ~1 min). A debug GUI is
 REM fine for testing; use `cargo build -p nobd-app --release` for a shipping exe.
 taskkill /IM nobd.exe /F >nul 2>&1
 pushd "%~dp0"
-cargo build -p nobd-app
+REM The hook too: the app installs the DINPUT8.dll that sits NEXT TO nobd.exe.
+REM Building the app alone leaves none there, so nothing ever reaches Marvel.
+cargo build -p nobd-app -p nobd-hook
 if errorlevel 1 ( popd & exit /b 1 )
 popd
 start "" "%~dp0target\debug\nobd.exe" %*

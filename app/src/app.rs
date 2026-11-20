@@ -16,9 +16,24 @@ enum SourceKind {
 use crate::palette::{ACTION, BROKEN, HAIRLINE, INK, INK_DIM, INK_FAINT, LIVE, NEEDS_YOU, SURFACE, WELL};
 const LOG_MAX: usize = 500;
 
+/// What NOBD was doing at the moment a press happened. Stored ON the row: the
+/// tape used to ask this at draw time, so flipping the switch relabelled the
+/// whole history and no row could say what had actually happened to it.
+#[derive(Clone, Copy, PartialEq)]
+enum NobdAt {
+    /// Running and switched on, with the window it was using.
+    Syncing { window_ms: f64 },
+    /// Running, but the player switched sync off.
+    SwitchedOff,
+    /// Neither the in-game hook nor the virtual controller is carrying presses.
+    NotRunning,
+}
+
 enum GapLogEntry {
     Pair {
         controller: usize,
+        /// NOBD's state when this press was made, not when it is drawn.
+        nobd: NobdAt,
         attempt: usize,
         button_a: String,
         button_b: String,
@@ -53,8 +68,9 @@ fn odds_phrase(risk: f64) -> String {
     } else if risk >= 1.0 {
         "drops every time".to_owned()
     } else {
+        // The bare "about 1 in 16" never said 1 in 16 WHAT.
         let n = (1.0 / risk).round().max(2.0);
-        format!("about 1 in {n:.0}")
+        format!("drops about 1 in {n:.0}")
     }
 }
 
@@ -942,6 +958,7 @@ impl eframe::App for FingerGapApp {
                 .and_then(|i| i.report_rate_hz())
                 .filter(|h| *h > 0.0)
                 .map(|h| 1000.0 / h);
+            let nobd = self.nobd_now();
 
             for pair in result.pairs {
                 let c = pair.controller;
@@ -956,6 +973,7 @@ impl eframe::App for FingerGapApp {
                 let risk = crate::stats::split_risk(pair.gap_ms);
                 self.push_log(GapLogEntry::Pair {
                     controller: c,
+                    nobd,
                     attempt,
                     button_a: format_button(pair.button_a),
                     button_b: format_button(pair.button_b),
@@ -1245,15 +1263,45 @@ impl FingerGapApp {
             .is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(1500))
     }
 
+    /// What NOBD is doing to a press made right now. Sync is running if EITHER
+    /// path is carrying it: `controller_present` alone is false by design once
+    /// the hook is the path. `hook_live()`, not `hook_is_path()`: the question is
+    /// whether the hook is RUNNING, not whether Marvel is installed.
+    fn nobd_now(&self) -> NobdAt {
+        use std::sync::atomic::Ordering;
+        let st = nobd_shared::state();
+        if !(self.controller_present || self.hook_live()) {
+            NobdAt::NotRunning
+        } else if st.enabled.load(Ordering::Relaxed) == 0 {
+            NobdAt::SwitchedOff
+        } else {
+            NobdAt::Syncing {
+                window_ms: st.window_ms[0].load(Ordering::Relaxed).clamp(1, 16) as f64,
+            }
+        }
+    }
+
     /// The whole answer, in the order a player asks it: is Marvel here, is NOBD
     /// in it, and is it working right now.
     fn draw_hook_status(&mut self, ui: &mut Ui) {
         let live = self.hook_live();
+        // The player took NOBD out with "Remove from Marvel". This state used to
+        // fall through to INSTALLING and sit there forever - the install worker
+        // was honouring the off switch while the card promised it was working.
+        let removed = self.game_dir.is_some()
+            && !live
+            && !crate::gameinstall::HOOK_ENABLED.load(std::sync::atomic::Ordering::Relaxed);
+        let mut add_back = false;
         let (accent, title, body) = match (&self.game_dir, self.hook_state.installed.load(std::sync::atomic::Ordering::Relaxed), live) {
             (None, _, _) => (
                 NEEDS_YOU,
                 "MARVEL NOT FOUND",
                 "NOBD couldn't find Marvel vs Capcom in your Steam library.".to_owned(),
+            ),
+            (Some(_), _, _) if removed => (
+                NEEDS_YOU,
+                "NOBD IS REMOVED FROM MARVEL",
+                "You took NOBD out of the game, so it is doing nothing. It stays out until you add it back.".to_owned(),
             ),
             // A loaded DLL cannot be replaced, so say so rather than sitting on
             // "installing" forever while retrying a copy that cannot succeed.
@@ -1315,6 +1363,10 @@ impl FingerGapApp {
                     ui.label(RichText::new(title).size(20.0).strong().color(INK));
                 });
                 ui.label(RichText::new(body).size(13.0).color(INK_DIM));
+                // The fix sits where the problem is reported, not in the bottom bar.
+                if removed && ui.button(RichText::new("Add NOBD to Marvel").size(13.0)).clicked() {
+                    add_back = true;
+                }
                 if let Some(dir) = &self.game_dir {
                     ui.label(
                         RichText::new(dir.display().to_string())
@@ -1326,6 +1378,10 @@ impl FingerGapApp {
                     ui.colored_label(NEEDS_YOU, RichText::new(m).size(11.0));
                 }
             });
+        if add_back {
+            crate::gameinstall::HOOK_ENABLED.store(true, std::sync::atomic::Ordering::Relaxed);
+            self.persist_ui();
+        }
     }
 
     fn draw_hero(&mut self, ui: &mut Ui) {
@@ -1692,20 +1748,6 @@ impl FingerGapApp {
     /// half is never blank and the page can never produce a scrollbar.
     fn draw_tape(&mut self, ui: &mut Ui) {
         let nobd_slot = self.sync_service.virtual_slot().map(|s| s as usize);
-        let st = nobd_shared::state();
-        let window_ms = st.window_ms[0].load(std::sync::atomic::Ordering::Relaxed).clamp(1, 16) as f64;
-        // Passthrough when sync is off - the after-column must say so.
-        // Sync is running if EITHER path is carrying it. This used to test
-        // `controller_present` alone, which is false by design once the hook is
-        // the path - so every row said "NOBD off" while the card above it
-        // correctly said NOBD IS LIVE IN MARVEL.
-        // `hook_live()`, not `hook_is_path()`: the tape reports what happened to a real
-        // press, so the question is whether the hook was RUNNING, not whether Marvel is
-        // installed. (hook_is_path used to imply the DLL was current, which made it a
-        // rough proxy for live; it no longer does.)
-        let sync_on = (self.controller_present || self.hook_live())
-            && st.enabled.load(std::sync::atomic::Ordering::Relaxed) != 0;
-
         // Before and after, on the same row. Two separate readouts made the app
         // look like it was reporting a finger gap it had failed to close.
         ui.horizontal(|ui| {
@@ -1715,6 +1757,30 @@ impl FingerGapApp {
             flow_arrow(ui);
             ui.label(RichText::new("what the game got").size(11.0).color(INK_DIM));
         });
+        // One plain sentence answering "is it working?", right where the player
+        // is looking. The rows below are history; this line is now.
+        let (colour, now) = match self.nobd_now() {
+            NobdAt::Syncing { window_ms } => (
+                LIVE,
+                format!("NOBD is working \u{2014} presses up to {window_ms:.0} ms apart reach the game together."),
+            ),
+            NobdAt::SwitchedOff => (
+                NEEDS_YOU,
+                "NOBD is switched off \u{2014} the game is getting your presses exactly as you made them.".to_owned(),
+            ),
+            // Marvel closed is the normal resting state, not a fault: NOBD lives
+            // inside the game. "NOBD is not running" made a healthy install look
+            // broken, so say what is true and what to do. Dim, not amber.
+            NobdAt::NotRunning if self.hook_is_path() => (
+                INK_DIM,
+                "Marvel isn't open, so these are your raw presses. NOBD starts when the game does.".to_owned(),
+            ),
+            NobdAt::NotRunning => (
+                NEEDS_YOU,
+                "NOBD is not running \u{2014} these are your raw presses.".to_owned(),
+            ),
+        };
+        ui.label(RichText::new(now).size(11.0).color(colour));
         let h = ui.available_height().clamp(72.0, 320.0);
         egui::Frame::new()
             .fill(WELL)
@@ -1744,7 +1810,7 @@ impl FingerGapApp {
                             return;
                         }
                         for e in &rows[range] {
-                            render_log_entry(ui, e, window_ms, sync_on);
+                            render_log_entry(ui, e);
                         }
                     });
             });
@@ -2292,9 +2358,9 @@ fn log_entry_slot(e: &GapLogEntry) -> usize {
 /// game's phase, so two identical 2.1 ms gaps would legitimately print opposite
 /// answers on adjacent rows. Only the two ends are certain, and those we state
 /// outright.
-fn render_log_entry(ui: &mut Ui, e: &GapLogEntry, window_ms: f64, sync_on: bool) {
+fn render_log_entry(ui: &mut Ui, e: &GapLogEntry) {
     match e {
-        GapLogEntry::Pair { attempt, button_a, button_b, count, gap_ms, risk, .. } => {
+        GapLogEntry::Pair { attempt, button_a, button_b, count, gap_ms, risk, nobd, .. } => {
             let chord = if *count > 2 { format!(" ({} btn)", count) } else { String::new() };
             // The after-value is DERIVED, not simulated: the window's rule is
             // exactly "pressed within the window -> committed in one output
@@ -2302,11 +2368,44 @@ fn render_log_entry(ui: &mut Ui, e: &GapLogEntry, window_ms: f64, sync_on: bool)
             // gap outside it arrives unchanged (NOBD shifts an edge, it never
             // widens one). No phase, no guessing.
             //
-            // `sync_on` is load-bearing. With sync off `SyncWindow::process`
+            // The NOBD state is load-bearing. With sync off `SyncWindow::process`
             // returns raw passthrough, so the game gets the gap the fingers
             // made. Deriving this from the window alone claimed "0.0 ms one
             // report" on every row of a switched-OFF app.
-            let grouped = sync_on && *gap_ms <= window_ms;
+            //
+            // Each row says two separate things, in this order: what NOBD did,
+            // then what that means in the game. "NOBD off - always safe" ran
+            // them together and read as a contradiction.
+            let together = *gap_ms <= 0.0;
+            let (colour, verdict) = match *nobd {
+                // Nothing to fix: the stick sent both buttons in one report.
+                // Not green - NOBD did no work here and must not take credit.
+                NobdAt::Syncing { .. } if together => {
+                    (INK_DIM, "already together \u{2014} nothing to fix".to_owned())
+                }
+                // The one place green is earned: NOBD's own contribution.
+                NobdAt::Syncing { window_ms } if *gap_ms <= window_ms => {
+                    (LIVE, "NOBD synced it \u{2014} landed together".to_owned())
+                }
+                NobdAt::Syncing { window_ms } => (
+                    INK_DIM,
+                    format!("outside the {window_ms:.0} ms window \u{2014} {}", odds_phrase(*risk)),
+                ),
+                NobdAt::SwitchedOff if together => {
+                    (INK_DIM, "NOBD switched off \u{2014} already together".to_owned())
+                }
+                NobdAt::SwitchedOff => {
+                    (INK_DIM, format!("NOBD switched off \u{2014} {}", odds_phrase(*risk)))
+                }
+                // No game was running, so nothing "got" this press. It is a
+                // measurement of the hands: what would happen without NOBD.
+                NobdAt::NotRunning if together => {
+                    (INK_DIM, "raw press \u{2014} already together".to_owned())
+                }
+                NobdAt::NotRunning => {
+                    (INK_DIM, format!("raw press \u{2014} {} without NOBD", odds_phrase(*risk)))
+                }
+            };
             ui.horizontal(|ui| {
                 ui.monospace(RichText::new(format!("#{attempt:>3}")).color(INK_FAINT));
                 ui.monospace(
@@ -2314,19 +2413,7 @@ fn render_log_entry(ui: &mut Ui, e: &GapLogEntry, window_ms: f64, sync_on: bool)
                         .color(INK),
                 );
                 flow_arrow(ui);
-                if grouped {
-                    // The one place green is earned: NOBD's own contribution.
-                    ui.monospace(RichText::new("landed together").color(LIVE));
-                } else if !sync_on {
-                    ui.monospace(
-                        RichText::new(format!("NOBD off \u{2014} {}", odds_phrase(*risk))).color(INK_DIM),
-                    );
-                } else {
-                    ui.monospace(
-                        RichText::new(format!("too far apart \u{2014} {}", odds_phrase(*risk)))
-                            .color(INK_DIM),
-                    );
-                }
+                ui.monospace(RichText::new(verdict).color(colour));
                 // The raw gap, as context for the verdict. This slot used to
                 // repeat the button names already shown on the left.
                 ui.monospace(
@@ -2336,9 +2423,11 @@ fn render_log_entry(ui: &mut Ui, e: &GapLogEntry, window_ms: f64, sync_on: bool)
         }
         GapLogEntry::Stray { button, solo_ms, reason, .. } => {
             ui.horizontal(|ui| {
-                ui.label(RichText::new("STRAY").size(11.0).color(INK_DIM));
+                // "STRAY ... (released before pair)" read like a fault report. It is
+                // one button pressed on its own, which is normal play.
+                ui.label(RichText::new("ONE BUTTON").size(11.0).color(INK_DIM));
                 ui.monospace(
-                    RichText::new(format!("{button} {solo_ms:.1}ms ({reason})"))
+                    RichText::new(format!("{button} alone for {solo_ms:.1} ms \u{2014} {reason}"))
                         .color(INK),
                 );
             });
